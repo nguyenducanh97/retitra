@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 7
+$OverlayVersion = 8
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -58,6 +58,29 @@ public class RetiTraOverlay : Form {
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RC r);
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] struct RC { public int L, T, R, B; }
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+
+  // ---- taskbar: hidden only while a split-screen slideshow runs, back in every other case ----
+  static bool taskbarHidden = false;
+  static List<IntPtr> Taskbars() {
+    List<IntPtr> l = new List<IntPtr>();
+    IntPtr t = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "Shell_TrayWnd", null);
+    if (t != IntPtr.Zero) l.Add(t);
+    IntPtr sec = IntPtr.Zero;
+    while ((sec = FindWindowEx(IntPtr.Zero, sec, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero) l.Add(sec); // other monitors
+    return l;
+  }
+  static void SetTaskbar(bool hide) {
+    foreach (IntPtr t in Taskbars()) {
+      bool vis = IsWindowVisible(t);
+      if (hide && vis) ShowWindow(t, 0);      // SW_HIDE
+      else if (!hide && !vis) ShowWindow(t, 5); // SW_SHOW
+    }
+    taskbarHidden = hide;
+  }
+  // Safety net, also used at start-up: whatever happened before, the taskbar is visible.
+  public static void RestoreTaskbar() { SetTaskbar(false); }
 
   // ---- split screen: the PowerPoint slideshow gets one part of its screen, the captions the other ----
   static IntPtr FindSlideShow() {
@@ -71,8 +94,10 @@ public class RetiTraOverlay : Form {
     return found;
   }
   void ArrangeSplit() {
+    IntPtr show = split == "off" || dismissed || !Visible ? IntPtr.Zero : FindSlideShow();
+    if (show != IntPtr.Zero) SetTaskbar(true);           // re-checked every 0.7 s (Windows may bring it back)
+    else if (taskbarHidden) SetTaskbar(false);           // slideshow over, split off or subtitles hidden
     if (split == "off" || dismissed || !Visible) return; // only while the subtitles are switched on
-    IntPtr show = FindSlideShow();
     Rectangle a = (show != IntPtr.Zero ? Screen.FromHandle(show) : Screen.FromHandle(Handle)).Bounds;
     int s = (int)Math.Round((split == "bottom" ? a.Height : a.Width) * splitSize / 100.0);
     Rectangle cap, slides;
@@ -97,6 +122,7 @@ public class RetiTraOverlay : Form {
     Left = wa.Left + (wa.Width - Width) / 2; Top = wa.Bottom - Height - 20;
     Layout2();
     new Thread(Serve) { IsBackground = true }.Start();
+    dockTimer = new System.Windows.Forms.Timer(); dockTimer.Interval = 700; dockTimer.Tick += delegate { ArrangeSplit(); }; dockTimer.Start();
   }
   protected override CreateParams CreateParams {
     get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x80; return cp; } // layered, no taskbar button
@@ -174,8 +200,7 @@ public class RetiTraOverlay : Form {
     float ss = Num(d, "splitSize", 30); splitSize = (int)Math.Max(10, Math.Min(70, ss));
     if (sp != split) {
       split = sp;
-      if (dockTimer == null) { dockTimer = new System.Windows.Forms.Timer(); dockTimer.Interval = 700; dockTimer.Tick += delegate { ArrangeSplit(); }; }
-      if (split == "off") dockTimer.Stop(); else { dockTimer.Start(); ArrangeSplit(); }
+      ArrangeSplit();
     }
     if (d.ContainsKey("lock")) SetLocked(Str(d, "lock") == "True");
     Render();
@@ -319,7 +344,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":7,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":8,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
@@ -328,7 +353,7 @@ public class RetiTraOverlay : Form {
       if (d != null) BeginInvoke((MethodInvoker)delegate { Apply(d); });
       Reply(s, 200, origin, "{\"ok\":true}"); return;
     }
-    if (method == "POST" && path.StartsWith("/close")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Hide(); }); return; }
+    if (method == "POST" && path.StartsWith("/close")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Hide(); ArrangeSplit(); }); return; }
     Reply(s, 404, origin, "{}");
   }
   static void Reply(NetworkStream s, int code, string origin, string json) {
@@ -348,6 +373,9 @@ public class RetiTraOverlay : Form {
 
   // Runs the subtitles in the background; the window appears only while RetiTra wants subtitles.
   public static void RunHost(bool show) {
+    RestoreTaskbar(); // in case an earlier copy was closed while the taskbar was hidden
+    AppDomain.CurrentDomain.ProcessExit += delegate { RestoreTaskbar(); };
+    Application.ApplicationExit += delegate { RestoreTaskbar(); };
     RetiTraOverlay f = new RetiTraOverlay();
     IntPtr h = f.Handle; // create the window so requests can reach it while hidden
     if (show) f.Show();
