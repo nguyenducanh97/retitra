@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 3
+$OverlayVersion = 4
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -34,7 +34,7 @@ public class RetiTraOverlay : Form {
   float font = 30f, scale = 1f;
   Color trColor = Color.FromArgb(253, 224, 71), orColor = Color.FromArgb(203, 213, 225), boxColor = Color.Black;
   int boxAlpha = 0;
-  bool showOr = true, outline = false, locked = false, connected = false;
+  bool showOr = true, outline = false, locked = false, connected = false, dismissed = false;
   Rectangle barRect, btnMinus, btnPlus, btnLock, btnClose, grip;
 
   [StructLayout(LayoutKind.Sequential)] struct PT { public int X, Y; }
@@ -71,6 +71,8 @@ public class RetiTraOverlay : Form {
     grip = new Rectangle(Width - 18, Height - 18, 18, 18);
   }
   protected override void OnShown(EventArgs e) { base.OnShown(e); Render(); }
+  protected override void OnVisibleChanged(EventArgs e) { base.OnVisibleChanged(e); if (Visible) Render(); }
+  protected override void OnFormClosing(FormClosingEventArgs e) { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; dismissed = true; Hide(); } else base.OnFormClosing(e); }
   protected override void OnResize(EventArgs e) { base.OnResize(e); Layout2(); Render(); }
   protected override void OnPaint(PaintEventArgs e) { }
   protected override void OnPaintBackground(PaintEventArgs e) { }
@@ -90,7 +92,7 @@ public class RetiTraOverlay : Form {
     if (btnMinus.Contains(e.Location)) { scale = Math.Max(0.5f, scale - 0.1f); Render(); }
     else if (btnPlus.Contains(e.Location)) { scale = Math.Min(2.5f, scale + 0.1f); Render(); }
     else if (btnLock.Contains(e.Location)) SetLocked(true);
-    else if (btnClose.Contains(e.Location)) Close();
+    else if (btnClose.Contains(e.Location)) { dismissed = true; Hide(); }
   }
   // Locked: every click goes through to the slides and the bar is hidden. Unlock from the RetiTra page.
   public void SetLocked(bool on) {
@@ -111,6 +113,7 @@ public class RetiTraOverlay : Form {
   }
   public void Apply(Dictionary<string, object> d) {
     connected = true;
+    if (!Visible) { Show(); TopMost = true; }
     object v;
     if (d.TryGetValue("lines", out v) && v is object[]) {
       List<Dictionary<string, object>> l = new List<Dictionary<string, object>>();
@@ -241,13 +244,16 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":3}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":4,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
+    if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
       Dictionary<string, object> d = new JavaScriptSerializer { MaxJsonLength = 400000 }.DeserializeObject(Encoding.UTF8.GetString(body, 0, got)) as Dictionary<string, object>;
+      if (dismissed) { Reply(s, 200, origin, "{\"ok\":true,\"dismissed\":true}"); return; }
       if (d != null) BeginInvoke((MethodInvoker)delegate { Apply(d); });
       Reply(s, 200, origin, "{\"ok\":true}"); return;
     }
-    if (method == "POST" && path.StartsWith("/close")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Close(); }); return; }
+    if (method == "POST" && path.StartsWith("/close")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Hide(); }); return; }
     Reply(s, 404, origin, "{}");
   }
   static void Reply(NetworkStream s, int code, string origin, string json) {
@@ -265,6 +271,13 @@ public class RetiTraOverlay : Form {
     s.Write(hb, 0, hb.Length); s.Write(b, 0, b.Length);
   }
 
+  // Runs the subtitles in the background; the window appears only while RetiTra wants subtitles.
+  public static void RunHost(bool show) {
+    RetiTraOverlay f = new RetiTraOverlay();
+    IntPtr h = f.Handle; // create the window so requests can reach it while hidden
+    if (show) f.Show();
+    Application.Run();
+  }
   public static bool PortFree() {
     try { TcpListener t = new TcpListener(IPAddress.Loopback, PORT); t.Start(); t.Stop(); return true; } catch { return false; }
   }
@@ -275,6 +288,8 @@ $HOME_DIR = Join-Path $env:LOCALAPPDATA "RetiTra"
 $INSTALLED = Join-Path $HOME_DIR "RetiTra-Helper.ps1"
 $DLL = Join-Path $HOME_DIR "RetiTraOverlay-$OverlayVersion.dll"
 $PROTO_KEY = "HKCU:\Software\Classes\retitra"
+$RUN_KEY = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$PS_EXE = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $REFS = @("System.Windows.Forms", "System.Drawing", "System.Web.Extensions")
 
 # The overlay is compiled once and kept next to the helper, so later starts take about a second.
@@ -291,7 +306,15 @@ function Load-Overlay {
 }
 # Copies itself to %LOCALAPPDATA%\RetiTra and registers retitra:// links for this Windows user only.
 # The link is handed to the script as a plain argument (-File), never run as code.
+function Send-Local($path) {
+  try { Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:47321$path" -Method Post -Body "{}" -Headers @{ Origin = "http://127.0.0.1:47321" } -TimeoutSec 2 | Out-Null; return $true } catch { return $false }
+}
+function Start-Background {
+  Start-Process $PS_EXE -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-WindowStyle", "Hidden", "-File", "`"$INSTALLED`"", "retitra://standby" -WindowStyle Hidden
+}
 function Install-Helper {
+  # stop an older copy that may be running (older versions only understand "close")
+  if (-not (Send-Local "/quit")) { [void](Send-Local "/close") } else { Start-Sleep -Milliseconds 600 }
   New-Item -ItemType Directory -Force -Path $HOME_DIR | Out-Null
   [IO.File]::WriteAllText($INSTALLED, [IO.File]::ReadAllText($env:RT_SELF))
   $cmd = "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$INSTALLED`" `"%1`""
@@ -299,21 +322,27 @@ function Install-Helper {
   Set-ItemProperty -Path $PROTO_KEY -Name "(default)" -Value "URL:RetiTra subtitles helper"
   Set-ItemProperty -Path $PROTO_KEY -Name "URL Protocol" -Value ""
   Set-ItemProperty -Path "$PROTO_KEY\shell\open\command" -Name "(default)" -Value $cmd
+  # wait quietly in the background from Windows sign-in, so the website never has to start it
+  Set-ItemProperty -Path $RUN_KEY -Name "RetiTra subtitles" -Value "`"$PS_EXE`" -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$INSTALLED`" retitra://standby"
   Load-Overlay
+  Start-Background
 }
 function Remove-Helper {
+  Remove-ItemProperty -Path $RUN_KEY -Name "RetiTra subtitles" -ErrorAction SilentlyContinue
+  if (-not (Send-Local "/quit")) { [void](Send-Local "/close") }
+  Start-Sleep -Milliseconds 800
   Remove-Item -Path $PROTO_KEY -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $HOME_DIR -Recurse -Force -ErrorAction SilentlyContinue
 }
-function Start-Overlay {
+function Start-Overlay([bool]$show) {
   Load-Overlay
-  if (-not [RetiTraOverlay]::PortFree()) { return }  # already running
-  [void](New-Object RetiTraOverlay).ShowDialog()
+  if (-not [RetiTraOverlay]::PortFree()) { if ($show) { [void](Send-Local "/show") }; return }  # already running
+  [RetiTraOverlay]::RunHost($show)
 }
 
 # ---- started by the website: retitra://subtitles ----
 $link = if ($args.Count) { [string]$args[0] } else { "" }
-if ($link -match '^retitra:') { Start-Overlay; exit }
+if ($link -match '^retitra:') { Start-Overlay (-not ($link -match 'standby')); exit }
 
 # ---- double-clicked: set up, then offer to start ----
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -332,7 +361,7 @@ $form.Location = New-Object Drawing.Point(($wa.Left + ($wa.Width - 430) / 2), ($
 $form.Font = New-Object Drawing.Font("Segoe UI", 9.5)
 $note = New-Object Windows.Forms.Label
 $note.Location = "15,12"; $note.Size = "390,60"; $note.ForeColor = $(if ($ok) { [Drawing.Color]::DarkGreen } else { [Drawing.Color]::Firebrick })
-$note.Text = $setupNote + "`nGo back to RetiTra and press Ready / Done. You can close this window."
+$note.Text = $setupNote + "`nIt now waits quietly in the background (also after restarting Windows). Go back to RetiTra and press Ready / Done."
 $form.Controls.Add($note)
 $startBtn = New-Object Windows.Forms.Button
 $startBtn.Text = "Show subtitles now"; $startBtn.Location = "15,85"; $startBtn.Size = "185,32"
@@ -344,7 +373,7 @@ $hint = New-Object Windows.Forms.Label
 $hint.Location = "15,128"; $hint.Size = "390,36"; $hint.ForeColor = [Drawing.Color]::DimGray
 $hint.Text = "Subtitles: drag the small bar to move, the corner to resize. Lock lets clicks pass through."
 $form.Controls.Add($hint)
-$startBtn.Add_Click({ $form.Hide(); Start-Overlay; $form.Close() })
+$startBtn.Add_Click({ [void](Send-Local "/show"); $form.Close() })
 $remove.Add_Click({
   Remove-Helper
   $note.ForeColor = [Drawing.Color]::DimGray
