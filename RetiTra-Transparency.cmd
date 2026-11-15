@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 8
+$OverlayVersion = 9
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -93,21 +93,67 @@ public class RetiTraOverlay : Form {
     }, IntPtr.Zero);
     return found;
   }
+  // ---- split with any program: the window in use is fitted next to the captions ----
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr h);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WP p);
+  [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr h, ref WP p);
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+  [StructLayout(LayoutKind.Sequential)] struct WP { public int length, flags, showCmd; public int minX, minY, maxX, maxY; public RC normal; }
+  Dictionary<IntPtr, WP> moved = new Dictionary<IntPtr, WP>(); // windows we resized, with their original placement
+  static readonly string[] Skip = { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "#32768", "#32770",
+    "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow", "TopLevelWindowForOverflowXamlIsland", "NotifyIconOverflowWindow",
+    "MultitaskingViewFrame", "ForegroundStaging", "TaskListThumbnailWnd", "tooltips_class32", "SysShadow" };
+  // A normal program window we may arrange: not ours, not a dialog/menu/taskbar/desktop, not always-on-top, not hidden.
+  bool Arrangeable(IntPtr h) {
+    if (h == IntPtr.Zero || h == Handle || !IsWindowVisible(h) || IsIconic(h)) return false;
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
+    if (GetWindow(h, 4) != IntPtr.Zero) return false;               // owned window (dialog, popup)
+    int ex = GetWindowLong(h, -20), st = GetWindowLong(h, -16);
+    if ((ex & 0x80) != 0 || (ex & 0x8) != 0) return false;          // tool window, always-on-top (e.g. picture-in-picture)
+    if ((st & 0x00C00000) != 0x00C00000 && (st & unchecked((int)0x80000000)) == 0) return false; // neither a captioned nor a popup app window
+    int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return false; // hidden UWP shells
+    StringBuilder c = new StringBuilder(64); GetClassName(h, c, 64);
+    return Array.IndexOf(Skip, c.ToString()) < 0;
+  }
+  void Fit(IntPtr h, Rectangle r) {
+    if (!moved.ContainsKey(h)) { WP wp = new WP(); wp.length = Marshal.SizeOf(typeof(WP)); if (GetWindowPlacement(h, ref wp)) moved[h] = wp; }
+    if (IsZoomed(h)) ShowWindow(h, 9); // un-maximise first, or Windows ignores the new size
+    RC cur; GetWindowRect(h, out cur);
+    if (cur.L != r.Left || cur.T != r.Top || cur.R != r.Right || cur.B != r.Bottom)
+      SetWindowPos(h, IntPtr.Zero, r.Left, r.Top, r.Width, r.Height, 0x0004 | 0x0010); // keep z-order, don't activate
+  }
+  // Split off or captions hidden: every window we moved goes back where it was.
+  public void RestoreMoved() {
+    foreach (KeyValuePair<IntPtr, WP> kv in moved) { if (IsWindow(kv.Key)) { WP wp = kv.Value; SetWindowPlacement(kv.Key, ref wp); } }
+    moved.Clear();
+  }
   void ArrangeSplit() {
-    IntPtr show = split == "off" || dismissed || !Visible ? IntPtr.Zero : FindSlideShow();
+    bool active = split != "off" && !dismissed && Visible;
+    IntPtr show = active ? FindSlideShow() : IntPtr.Zero;
     if (show != IntPtr.Zero) SetTaskbar(true);           // re-checked every 0.7 s (Windows may bring it back)
     else if (taskbarHidden) SetTaskbar(false);           // slideshow over, split off or subtitles hidden
-    if (split == "off" || dismissed || !Visible) return; // only while the subtitles are switched on
-    Rectangle a = (show != IntPtr.Zero ? Screen.FromHandle(show) : Screen.FromHandle(Handle)).Bounds;
+    if (!active) { if (moved.Count > 0) RestoreMoved(); return; }
+    // A slideshow gets its whole screen (taskbar hidden); otherwise the captions stay on their screen.
+    Screen scr = show != IntPtr.Zero ? Screen.FromHandle(show) : Screen.FromHandle(Handle);
+    Rectangle a = show != IntPtr.Zero ? scr.Bounds : scr.WorkingArea;
     int s = (int)Math.Round((split == "bottom" ? a.Height : a.Width) * splitSize / 100.0);
-    Rectangle cap, slides;
-    if (split == "left") { cap = new Rectangle(a.Left, a.Top, s, a.Height); slides = new Rectangle(a.Left + s, a.Top, a.Width - s, a.Height); }
-    else if (split == "bottom") { cap = new Rectangle(a.Left, a.Bottom - s, a.Width, s); slides = new Rectangle(a.Left, a.Top, a.Width, a.Height - s); }
-    else { cap = new Rectangle(a.Right - s, a.Top, s, a.Height); slides = new Rectangle(a.Left, a.Top, a.Width - s, a.Height); }
+    Rectangle cap, app;
+    if (split == "left") { cap = new Rectangle(a.Left, a.Top, s, a.Height); app = new Rectangle(a.Left + s, a.Top, a.Width - s, a.Height); }
+    else if (split == "bottom") { cap = new Rectangle(a.Left, a.Bottom - s, a.Width, s); app = new Rectangle(a.Left, a.Top, a.Width, a.Height - s); }
+    else { cap = new Rectangle(a.Right - s, a.Top, s, a.Height); app = new Rectangle(a.Left, a.Top, a.Width - s, a.Height); }
     if (show != IntPtr.Zero) {
       RC r; GetWindowRect(show, out r);
-      if (r.L != slides.Left || r.T != slides.Top || r.R != slides.Right || r.B != slides.Bottom)
-        SetWindowPos(show, IntPtr.Zero, slides.Left, slides.Top, slides.Width, slides.Height, 0x0004 | 0x0010); // no z-order change, no activation
+      if (r.L != app.Left || r.T != app.Top || r.R != app.Right || r.B != app.Bottom)
+        SetWindowPos(show, IntPtr.Zero, app.Left, app.Top, app.Width, app.Height, 0x0004 | 0x0010); // no z-order change, no activation
+    } else {
+      IntPtr fg = GetForegroundWindow();
+      if (Arrangeable(fg) && Screen.FromHandle(fg).DeviceName == scr.DeviceName) Fit(fg, app); // the program in use, on this screen
     }
     if (Bounds != cap) Bounds = cap;
   }
@@ -344,7 +390,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":8,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":9,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
@@ -377,6 +423,7 @@ public class RetiTraOverlay : Form {
     AppDomain.CurrentDomain.ProcessExit += delegate { RestoreTaskbar(); };
     Application.ApplicationExit += delegate { RestoreTaskbar(); };
     RetiTraOverlay f = new RetiTraOverlay();
+    Application.ApplicationExit += delegate { f.RestoreMoved(); }; // quitting puts moved windows back
     IntPtr h = f.Handle; // create the window so requests can reach it while hidden
     if (show) f.Show();
     Application.Run();
