@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 4
+$OverlayVersion = 5
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -54,7 +54,7 @@ public class RetiTraOverlay : Form {
     Text = "RetiTra subtitles";
     FormBorderStyle = FormBorderStyle.None;
     TopMost = true; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-    MinimumSize = new Size(320, 90);
+    MinimumSize = new Size(240, 70);
     Rectangle wa = Screen.PrimaryScreen.WorkingArea;
     Width = (int)(wa.Width * 0.72); Height = 230;
     Left = wa.Left + (wa.Width - Width) / 2; Top = wa.Bottom - Height - 20;
@@ -77,14 +77,23 @@ public class RetiTraOverlay : Form {
   protected override void OnPaint(PaintEventArgs e) { }
   protected override void OnPaintBackground(PaintEventArgs e) { }
 
-  // Drag by the bar, resize by the corner grip. Fully see-through pixels never receive the mouse.
+  // Unlocked: resize from any edge or corner, drag from anywhere else. Locked: clicks pass through.
   protected override void WndProc(ref Message m) {
     if (m.Msg == 0x84 && !locked) {
       int x = (short)((long)m.LParam & 0xFFFF), y = (short)(((long)m.LParam >> 16) & 0xFFFF);
       Point p = PointToClient(new Point(x, y));
-      if (grip.Contains(p)) { m.Result = (IntPtr)17; return; }
-      if (barRect.Contains(p) && p.X < btnMinus.Left) { m.Result = (IntPtr)2; return; }
-      if (!barRect.Contains(p)) { m.Result = (IntPtr)2; return; } // the box (if any) also drags
+      const int E = 10;
+      bool l = p.X < E, r = p.X >= Width - E, t = p.Y < E, b = p.Y >= Height - E;
+      if (barRect.Contains(p) && p.X >= btnMinus.Left) { base.WndProc(ref m); return; } // bar buttons
+      if (t && l) { m.Result = (IntPtr)13; return; }
+      if (t && r) { m.Result = (IntPtr)14; return; }
+      if (b && l) { m.Result = (IntPtr)16; return; }
+      if (b && r) { m.Result = (IntPtr)17; return; }
+      if (l) { m.Result = (IntPtr)10; return; }
+      if (r) { m.Result = (IntPtr)11; return; }
+      if (t) { m.Result = (IntPtr)12; return; }
+      if (b) { m.Result = (IntPtr)15; return; }
+      m.Result = (IntPtr)2; return;
     }
     base.WndProc(ref m);
   }
@@ -149,6 +158,11 @@ public class RetiTraOverlay : Form {
   static Color Fade(Color c, bool old) { return old ? Color.FromArgb(150, c) : c; }
 
   void Draw(Graphics g) {
+    if (!locked) {
+      // Nearly invisible fill so the whole area can be grabbed, plus a faint dashed frame showing the size.
+      using (SolidBrush catcher = new SolidBrush(Color.FromArgb(1, 0, 0, 0))) g.FillRectangle(catcher, 0, 0, Width, Height);
+      using (Pen frame = new Pen(Color.FromArgb(140, 148, 163, 184), 1.5f)) { frame.DashStyle = DashStyle.Dash; g.DrawRectangle(frame, 1, 1, Width - 3, Height - 3); }
+    }
     float size = font * scale, w = Width - 32, y = Height - 10;
     List<KeyValuePair<GraphicsPath, Color>> parts = new List<KeyValuePair<GraphicsPath, Color>>();
     float top = Height;
@@ -244,7 +258,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":4,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":5,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
@@ -371,7 +385,7 @@ $remove.Text = "Remove from this PC"; $remove.Location = "215,85"; $remove.Size 
 $form.Controls.Add($remove)
 $hint = New-Object Windows.Forms.Label
 $hint.Location = "15,128"; $hint.Size = "390,36"; $hint.ForeColor = [Drawing.Color]::DimGray
-$hint.Text = "Subtitles: drag the small bar to move, the corner to resize. Lock lets clicks pass through."
+$hint.Text = "Subtitles: drag to move, drag any edge or corner to resize. Lock lets clicks pass through."
 $form.Controls.Add($hint)
 $startBtn.Add_Click({ [void](Send-Local "/show"); $form.Close() })
 $remove.Add_Click({
