@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 6
+$OverlayVersion = 7
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -35,6 +35,8 @@ public class RetiTraOverlay : Form {
   Color trColor = Color.FromArgb(253, 224, 71), orColor = Color.FromArgb(203, 213, 225), boxColor = Color.Black;
   int boxAlpha = 0;
   bool showOr = true, outline = false, locked = false, connected = false, dismissed = false;
+  string split = "off"; int splitSize = 30;
+  System.Windows.Forms.Timer dockTimer;
   Rectangle barRect, btnMinus, btnPlus, btnLock, btnClose, grip;
 
   [StructLayout(LayoutKind.Sequential)] struct PT { public int X, Y; }
@@ -49,6 +51,41 @@ public class RetiTraOverlay : Form {
   [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
   [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
   [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+  delegate bool EnumProc(IntPtr h, IntPtr p);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RC r);
+  [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [StructLayout(LayoutKind.Sequential)] struct RC { public int L, T, R, B; }
+
+  // ---- split screen: the PowerPoint slideshow gets one part of its screen, the captions the other ----
+  static IntPtr FindSlideShow() {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate (IntPtr h, IntPtr p) {
+      if (!IsWindowVisible(h)) return true;
+      StringBuilder c = new StringBuilder(64); GetClassName(h, c, 64);
+      if (c.ToString() == "screenClass") { found = h; return false; } // PowerPoint's slideshow window
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  void ArrangeSplit() {
+    if (split == "off" || dismissed || !Visible) return; // only while the subtitles are switched on
+    IntPtr show = FindSlideShow();
+    Rectangle a = (show != IntPtr.Zero ? Screen.FromHandle(show) : Screen.FromHandle(Handle)).Bounds;
+    int s = (int)Math.Round((split == "bottom" ? a.Height : a.Width) * splitSize / 100.0);
+    Rectangle cap, slides;
+    if (split == "left") { cap = new Rectangle(a.Left, a.Top, s, a.Height); slides = new Rectangle(a.Left + s, a.Top, a.Width - s, a.Height); }
+    else if (split == "bottom") { cap = new Rectangle(a.Left, a.Bottom - s, a.Width, s); slides = new Rectangle(a.Left, a.Top, a.Width, a.Height - s); }
+    else { cap = new Rectangle(a.Right - s, a.Top, s, a.Height); slides = new Rectangle(a.Left, a.Top, a.Width - s, a.Height); }
+    if (show != IntPtr.Zero) {
+      RC r; GetWindowRect(show, out r);
+      if (r.L != slides.Left || r.T != slides.Top || r.R != slides.Right || r.B != slides.Bottom)
+        SetWindowPos(show, IntPtr.Zero, slides.Left, slides.Top, slides.Width, slides.Height, 0x0004 | 0x0010); // no z-order change, no activation
+    }
+    if (Bounds != cap) Bounds = cap;
+  }
 
   public RetiTraOverlay() {
     Text = "RetiTra subtitles";
@@ -133,6 +170,13 @@ public class RetiTraOverlay : Form {
     trColor = Hex(Str(d, "tr"), trColor); orColor = Hex(Str(d, "or"), orColor); boxColor = Hex(Str(d, "bg"), boxColor);
     showOr = Str(d, "showOr") != "False"; outline = Str(d, "outline") == "True";
     boxAlpha = (int)Math.Round(Math.Max(0, Math.Min(100, Num(d, "bgAlpha", 0))) * 2.55);
+    string sp = Str(d, "split"); if (sp.Length == 0) sp = "off";
+    float ss = Num(d, "splitSize", 30); splitSize = (int)Math.Max(10, Math.Min(70, ss));
+    if (sp != split) {
+      split = sp;
+      if (dockTimer == null) { dockTimer = new System.Windows.Forms.Timer(); dockTimer.Interval = 700; dockTimer.Tick += delegate { ArrangeSplit(); }; }
+      if (split == "off") dockTimer.Stop(); else { dockTimer.Start(); ArrangeSplit(); }
+    }
     if (d.ContainsKey("lock")) SetLocked(Str(d, "lock") == "True");
     Render();
   }
@@ -197,7 +241,7 @@ public class RetiTraOverlay : Form {
       foreach (KeyValuePair<GraphicsPath, Color> kv in blocks[i]) { Matrix mt = new Matrix(); mt.Translate(16, y + size * 0.25f); kv.Key.Transform(mt); parts.Add(kv); }
       top = y + size * 0.25f;
     }
-    if (boxAlpha > 0 && parts.Count > 0) using (SolidBrush bb = new SolidBrush(Color.FromArgb(boxAlpha, boxColor))) g.FillRectangle(bb, 6, top - 10, Width - 12, Height - top + 6);
+    if (boxAlpha > 0) using (SolidBrush bb = new SolidBrush(Color.FromArgb(boxAlpha, boxColor))) g.FillRectangle(bb, 0, 0, Width, Height); // the whole window, also when empty
     using (Pen pen = new Pen(Color.FromArgb(220, 0, 0, 0), Math.Max(2f, size / 7f))) {
       pen.LineJoin = LineJoin.Round;
       foreach (KeyValuePair<GraphicsPath, Color> kv in parts) {
@@ -275,7 +319,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":6,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":7,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
