@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 5
+$OverlayVersion = 6
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -155,7 +155,7 @@ public class RetiTraOverlay : Form {
     p.AddString(text, fam, (int)st, size, new RectangleF(0, 0, width, 4000), StringFormat.GenericTypographic);
     return p;
   }
-  static Color Fade(Color c, bool old) { return old ? Color.FromArgb(150, c) : c; }
+  static Color Fade(Color c, bool old) { return old ? Color.FromArgb(185, c) : c; }
 
   void Draw(Graphics g) {
     if (!locked) {
@@ -163,21 +163,38 @@ public class RetiTraOverlay : Form {
       using (SolidBrush catcher = new SolidBrush(Color.FromArgb(1, 0, 0, 0))) g.FillRectangle(catcher, 0, 0, Width, Height);
       using (Pen frame = new Pen(Color.FromArgb(140, 148, 163, 184), 1.5f)) { frame.DashStyle = DashStyle.Dash; g.DrawRectangle(frame, 1, 1, Width - 3, Height - 3); }
     }
-    float size = font * scale, w = Width - 32, y = Height - 10;
-    List<KeyValuePair<GraphicsPath, Color>> parts = new List<KeyValuePair<GraphicsPath, Color>>();
-    float top = Height;
-    for (int i = lines.Count - 1; i >= 0; i--) {
+    float size = font * scale, w = Width - 32;
+    int n = lines.Count;
+    // Build each line's text first, then choose what fits: the line being read ("cur") always stays;
+    // the next lines below it come next, then older lines above it. Only older lines are dimmed.
+    int cur = n - 1;
+    for (int i = 0; i < n; i++) if (Str(lines[i], "cur") == "True") cur = i;
+    List<List<KeyValuePair<GraphicsPath, Color>>> blocks = new List<List<KeyValuePair<GraphicsPath, Color>>>();
+    float[] hs = new float[n];
+    for (int i = 0; i < n; i++) {
       Dictionary<string, object> ln = lines[i];
-      bool old = i < lines.Count - 1;
+      bool old = ln.ContainsKey("old") ? Str(ln, "old") == "True" : i < n - 1;
       List<KeyValuePair<GraphicsPath, Color>> block = new List<KeyValuePair<GraphicsPath, Color>>();
       float h = 0;
       string who = Str(ln, "who"), tr = Str(ln, "tr"), or = Str(ln, "or");
       if (who.Length > 0) { GraphicsPath p = TextPath(who, size * 0.5f, true, w); block.Add(new KeyValuePair<GraphicsPath, Color>(p, Fade(Hex(Str(ln, "color"), Color.FromArgb(147, 197, 253)), old))); h += size * 0.62f; }
       if (tr.Length > 0) { GraphicsPath p = TextPath(tr, Str(ln, "wait") == "True" ? size * 0.65f : size, true, w); RectangleF b = p.GetBounds(); Matrix mt = new Matrix(); mt.Translate(0, h); p.Transform(mt); block.Add(new KeyValuePair<GraphicsPath, Color>(p, Fade(trColor, old))); h += b.Bottom + size * 0.18f; }
       if (showOr && or.Length > 0) { GraphicsPath p = TextPath(or, size * 0.58f, false, w); RectangleF b = p.GetBounds(); Matrix mt = new Matrix(); mt.Translate(0, h); p.Transform(mt); block.Add(new KeyValuePair<GraphicsPath, Color>(p, Fade(orColor, old))); h += b.Bottom + size * 0.12f; }
-      if (y - h < (locked ? 4 : 30) && i < lines.Count - 1) { foreach (KeyValuePair<GraphicsPath, Color> kv in block) kv.Key.Dispose(); break; }
-      y -= h + size * 0.25f;
-      foreach (KeyValuePair<GraphicsPath, Color> kv in block) { Matrix mt = new Matrix(); mt.Translate(16, y + size * 0.25f); kv.Key.Transform(mt); parts.Add(kv); }
+      blocks.Add(block);
+      hs[i] = h + size * 0.25f;
+    }
+    float avail = Height - 10 - (locked ? 4 : 30);
+    bool[] keep = new bool[n];
+    float used = 0;
+    if (n > 0) { keep[cur] = true; used = hs[cur]; }
+    for (int i = cur + 1; i < n; i++) { if (used + hs[i] <= avail) { keep[i] = true; used += hs[i]; } else break; }
+    for (int i = cur - 1; i >= 0; i--) { if (used + hs[i] <= avail) { keep[i] = true; used += hs[i]; } else break; }
+    List<KeyValuePair<GraphicsPath, Color>> parts = new List<KeyValuePair<GraphicsPath, Color>>();
+    float y = Height - 10, top = Height;
+    for (int i = n - 1; i >= 0; i--) {
+      if (!keep[i]) { foreach (KeyValuePair<GraphicsPath, Color> kv in blocks[i]) kv.Key.Dispose(); continue; }
+      y -= hs[i];
+      foreach (KeyValuePair<GraphicsPath, Color> kv in blocks[i]) { Matrix mt = new Matrix(); mt.Translate(16, y + size * 0.25f); kv.Key.Transform(mt); parts.Add(kv); }
       top = y + size * 0.25f;
     }
     if (boxAlpha > 0 && parts.Count > 0) using (SolidBrush bb = new SolidBrush(Color.FromArgb(boxAlpha, boxColor))) g.FillRectangle(bb, 6, top - 10, Width - 12, Height - top + 6);
@@ -258,7 +275,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":5,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":6,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
