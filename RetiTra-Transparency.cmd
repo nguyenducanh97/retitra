@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 10
+$OverlayVersion = 11
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -37,7 +37,15 @@ public class RetiTraOverlay : Form {
   bool showOr = true, outline = false, locked = false, connected = false, dismissed = false;
   string split = "off"; int splitSize = 30;
   System.Windows.Forms.Timer dockTimer;
-  Rectangle barRect, btnMinus, btnPlus, btnLock, btnClose, grip;
+  Rectangle barRect, btnPause, btnMinus, btnPlus, btnLock, btnClose, grip;
+  // Pause (a confidential moment): pressed here or with Ctrl+Alt+P from any program. Each press is counted;
+  // the RetiTra page sees the count change (within a second) and pauses or resumes the meeting.
+  bool paused = false, running = false; volatile int toggles = 0;
+  [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
+  [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr h, int id);
+  void TogglePause() { toggles++; paused = !paused; Render(); }
+  protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); RegisterHotKey(Handle, 1, 0x4000 | 0x2 | 0x1, 0x50); } // Ctrl+Alt+P, no repeat
+  protected override void OnHandleDestroyed(EventArgs e) { UnregisterHotKey(Handle, 1); base.OnHandleDestroyed(e); }
 
   [StructLayout(LayoutKind.Sequential)] struct PT { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)] struct SZ { public int CX, CY; }
@@ -218,9 +226,10 @@ public class RetiTraOverlay : Form {
     get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x80; return cp; } // layered, no taskbar button
   }
   void Layout2() {
-    barRect = new Rectangle(0, 0, 214, 26);
-    btnMinus = new Rectangle(94, 3, 26, 20); btnPlus = new Rectangle(122, 3, 26, 20);
-    btnLock = new Rectangle(150, 3, 30, 20); btnClose = new Rectangle(182, 3, 28, 20);
+    barRect = new Rectangle(0, 0, 276, 26);
+    btnPause = new Rectangle(94, 3, 60, 20);
+    btnMinus = new Rectangle(156, 3, 26, 20); btnPlus = new Rectangle(184, 3, 26, 20);
+    btnLock = new Rectangle(212, 3, 30, 20); btnClose = new Rectangle(244, 3, 28, 20);
     grip = new Rectangle(Width - 18, Height - 18, 18, 18);
   }
   protected override void OnShown(EventArgs e) { base.OnShown(e); Render(); }
@@ -232,12 +241,13 @@ public class RetiTraOverlay : Form {
 
   // Unlocked: resize from any edge or corner, drag from anywhere else. Locked: clicks pass through.
   protected override void WndProc(ref Message m) {
+    if (m.Msg == 0x312) { TogglePause(); return; } // WM_HOTKEY: Ctrl+Alt+P
     if (m.Msg == 0x84 && !locked) {
       int x = (short)((long)m.LParam & 0xFFFF), y = (short)(((long)m.LParam >> 16) & 0xFFFF);
       Point p = PointToClient(new Point(x, y));
       const int E = 10;
       bool l = p.X < E, r = p.X >= Width - E, t = p.Y < E, b = p.Y >= Height - E;
-      if (barRect.Contains(p) && p.X >= btnMinus.Left) { base.WndProc(ref m); return; } // bar buttons
+      if (barRect.Contains(p) && p.X >= btnPause.Left) { base.WndProc(ref m); return; } // bar buttons
       if (t && l) { m.Result = (IntPtr)13; return; }
       if (t && r) { m.Result = (IntPtr)14; return; }
       if (b && l) { m.Result = (IntPtr)16; return; }
@@ -251,7 +261,8 @@ public class RetiTraOverlay : Form {
     base.WndProc(ref m);
   }
   protected override void OnMouseUp(MouseEventArgs e) {
-    if (btnMinus.Contains(e.Location)) { scale = Math.Max(0.5f, scale - 0.1f); Render(); }
+    if (btnPause.Contains(e.Location)) TogglePause();
+    else if (btnMinus.Contains(e.Location)) { scale = Math.Max(0.5f, scale - 0.1f); Render(); }
     else if (btnPlus.Contains(e.Location)) { scale = Math.Min(2.5f, scale + 0.1f); Render(); }
     else if (btnLock.Contains(e.Location)) SetLocked(true);
     else if (btnClose.Contains(e.Location)) { dismissed = true; Hide(); }
@@ -293,6 +304,8 @@ public class RetiTraOverlay : Form {
       ArrangeSplit();
     }
     if (d.ContainsKey("lock")) SetLocked(Str(d, "lock") == "True");
+    if (d.ContainsKey("paused")) paused = Str(d, "paused") == "True"; // the page's state wins
+    if (d.ContainsKey("running")) running = Str(d, "running") == "True";
     Render();
   }
 
@@ -373,10 +386,22 @@ public class RetiTraOverlay : Form {
         g.FillPath(connected ? Brushes.PaleGreen : Brushes.White, p);
       }
     }
+    if (paused) {
+      // A clear badge while nothing is listened to (shown even when locked).
+      using (Font f = new Font("Segoe UI", 12f, FontStyle.Bold)) {
+        string msg = "Paused: nothing is listened to. Ctrl+Alt+P to resume";
+        SizeF sz = g.MeasureString(msg, f);
+        RectangleF r = new RectangleF((Width - sz.Width) / 2 - 12, locked ? 6 : 32, sz.Width + 24, sz.Height + 8);
+        using (SolidBrush bb = new SolidBrush(Color.FromArgb(235, 180, 83, 9))) g.FillRectangle(bb, r);
+        g.DrawString(msg, f, Brushes.White, r.X + 12, r.Y + 4);
+      }
+    }
     if (!locked) {
       using (SolidBrush bar = new SolidBrush(Color.FromArgb(235, 30, 41, 59))) g.FillRectangle(bar, barRect);
+      using (SolidBrush pb = new SolidBrush(paused ? Color.FromArgb(255, 180, 83, 9) : Color.FromArgb(255, 51, 65, 85))) g.FillRectangle(pb, btnPause);
       using (Font f = new Font("Segoe UI", 9f, FontStyle.Bold)) {
         g.DrawString("::  RetiTra", f, Brushes.Gainsboro, 6, 5);
+        g.DrawString(paused ? "Resume" : "Pause", f, Brushes.White, btnPause.X + (paused ? 6 : 10), 5);
         g.DrawString("A-", f, Brushes.White, btnMinus.X + 5, 5); g.DrawString("A+", f, Brushes.White, btnPlus.X + 4, 5);
         g.DrawString("Lock", f, Brushes.White, btnLock.X, 5); g.DrawString("X", f, Brushes.White, btnClose.X + 9, 5);
       }
@@ -434,14 +459,14 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":10,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":11,\"toggle\":" + toggles + ",\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
       Dictionary<string, object> d = new JavaScriptSerializer { MaxJsonLength = 400000 }.DeserializeObject(Encoding.UTF8.GetString(body, 0, got)) as Dictionary<string, object>;
       if (dismissed) { Reply(s, 200, origin, "{\"ok\":true,\"dismissed\":true}"); return; }
       if (d != null) BeginInvoke((MethodInvoker)delegate { Apply(d); });
-      Reply(s, 200, origin, "{\"ok\":true}"); return;
+      Reply(s, 200, origin, "{\"ok\":true,\"toggle\":" + toggles + "}"); return;
     }
     if (method == "POST" && path.StartsWith("/close")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Hide(); ArrangeSplit(); }); return; }
     Reply(s, 404, origin, "{}");
