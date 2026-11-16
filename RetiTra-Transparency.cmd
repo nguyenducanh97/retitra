@@ -10,7 +10,7 @@ exit /b
 # 47321); nothing leaves the computer, and only the RetiTra website is accepted.
 # Double-click: sets it up for your Windows account (no admin rights) so the website can start it with a
 # retitra:// link. "Remove from this PC" undoes the setup.
-$OverlayVersion = 9
+$OverlayVersion = 10
 $OverlaySource = @"
 using System;
 using System.Collections.Generic;
@@ -133,26 +133,70 @@ public class RetiTraOverlay : Form {
     foreach (KeyValuePair<IntPtr, WP> kv in moved) { if (IsWindow(kv.Key)) { WP wp = kv.Value; SetWindowPlacement(kv.Key, ref wp); } }
     moved.Clear();
   }
+  // ---- fullscreen videos: a browser or player in fullscreen refuses to be made smaller, so a live, scaled
+  // copy of it (the same kind of copy Windows shows in Alt-Tab) is shown next to the captions instead. The real
+  // window keeps playing underneath at full quality; clicks and keys still go to it. ----
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+  RetiTraStage stage; IntPtr stageSrc = IntPtr.Zero;
+  bool Ours(IntPtr h) { return h == Handle || (stage != null && stage.IsHandleCreated && h == stage.Handle); }
+  bool FullscreenOn(IntPtr h, Screen scr) {
+    if (h == IntPtr.Zero || Ours(h) || !IsWindowVisible(h) || IsIconic(h)) return false;
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id) return false;
+    int ex = GetWindowLong(h, -20), st = GetWindowLong(h, -16);
+    if ((ex & 0x80) != 0 || (ex & 0x8) != 0) return false;          // tool window, always-on-top
+    if ((st & 0x00C00000) == 0x00C00000) return false;              // has a title bar: a maximised window, not fullscreen
+    int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return false;
+    StringBuilder c = new StringBuilder(64); GetClassName(h, c, 64);
+    if (Array.IndexOf(Skip, c.ToString()) >= 0) return false;       // desktop, taskbar, menus
+    RC r; GetWindowRect(h, out r); Rectangle b = scr.Bounds;
+    return r.L <= b.Left && r.T <= b.Top && r.R >= b.Right && r.B >= b.Bottom;
+  }
+  void ShowStage(IntPtr src, Rectangle bounds, Rectangle app) {
+    if (stage == null) stage = new RetiTraStage();
+    if (stage.Bounds != bounds) stage.Bounds = bounds;
+    if (!stage.Visible) stage.Show();
+    if (src != stageSrc) { stage.Attach(src); stageSrc = src; }
+    RC r; GetWindowRect(src, out r);
+    int sw = Math.Max(1, r.R - r.L), sh = Math.Max(1, r.B - r.T);
+    double k = Math.Min((double)app.Width / sw, (double)app.Height / sh); // whole picture, same shape
+    int w = (int)(sw * k), h = (int)(sh * k);
+    stage.Place(new Rectangle(app.Left - bounds.Left + (app.Width - w) / 2, app.Top - bounds.Top + (app.Height - h) / 2, w, h));
+    SetWindowPos(Handle, (IntPtr)(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); // captions stay above the copy
+  }
+  void HideStage() {
+    if (stage != null && stage.Visible) { stage.Detach(); stage.Hide(); }
+    stageSrc = IntPtr.Zero;
+  }
   void ArrangeSplit() {
     bool active = split != "off" && !dismissed && Visible;
     IntPtr show = active ? FindSlideShow() : IntPtr.Zero;
     if (show != IntPtr.Zero) SetTaskbar(true);           // re-checked every 0.7 s (Windows may bring it back)
     else if (taskbarHidden) SetTaskbar(false);           // slideshow over, split off or subtitles hidden
-    if (!active) { if (moved.Count > 0) RestoreMoved(); return; }
+    if (!active) { HideStage(); if (moved.Count > 0) RestoreMoved(); return; }
     // A slideshow gets its whole screen (taskbar hidden); otherwise the captions stay on their screen.
     Screen scr = show != IntPtr.Zero ? Screen.FromHandle(show) : Screen.FromHandle(Handle);
-    Rectangle a = show != IntPtr.Zero ? scr.Bounds : scr.WorkingArea;
+    IntPtr fg = show == IntPtr.Zero ? GetForegroundWindow() : IntPtr.Zero;
+    // (A small popup of the fullscreen window, e.g. a browser notice, belongs to it: its owner is the video.)
+    IntPtr owner = fg != IntPtr.Zero ? GetAncestor(fg, 3) : IntPtr.Zero;
+    IntPtr full = FullscreenOn(fg, scr) ? fg : FullscreenOn(owner, scr) ? owner : IntPtr.Zero;
+    // The copy stays while its window is still fullscreen and still in use (or the captions were clicked).
+    if (full == IntPtr.Zero && stageSrc != IntPtr.Zero && (fg == stageSrc || owner == stageSrc || Ours(fg)) && FullscreenOn(stageSrc, scr)) full = stageSrc;
+    Rectangle a = show != IntPtr.Zero || full != IntPtr.Zero ? scr.Bounds : scr.WorkingArea;
     int s = (int)Math.Round((split == "bottom" ? a.Height : a.Width) * splitSize / 100.0);
     Rectangle cap, app;
     if (split == "left") { cap = new Rectangle(a.Left, a.Top, s, a.Height); app = new Rectangle(a.Left + s, a.Top, a.Width - s, a.Height); }
     else if (split == "bottom") { cap = new Rectangle(a.Left, a.Bottom - s, a.Width, s); app = new Rectangle(a.Left, a.Top, a.Width, a.Height - s); }
     else { cap = new Rectangle(a.Right - s, a.Top, s, a.Height); app = new Rectangle(a.Left, a.Top, a.Width - s, a.Height); }
     if (show != IntPtr.Zero) {
+      HideStage();
       RC r; GetWindowRect(show, out r);
       if (r.L != app.Left || r.T != app.Top || r.R != app.Right || r.B != app.Bottom)
         SetWindowPos(show, IntPtr.Zero, app.Left, app.Top, app.Width, app.Height, 0x0004 | 0x0010); // no z-order change, no activation
+    } else if (full != IntPtr.Zero) {
+      ShowStage(full, scr.Bounds, app); // a fullscreen video: shown scaled beside the captions
     } else {
-      IntPtr fg = GetForegroundWindow();
+      HideStage();
       if (Arrangeable(fg) && Screen.FromHandle(fg).DeviceName == scr.DeviceName) Fit(fg, app); // the program in use, on this screen
     }
     if (Bounds != cap) Bounds = cap;
@@ -390,7 +434,7 @@ public class RetiTraOverlay : Form {
     while (got < len) { int r = s.Read(body, got, len - got); if (r <= 0) break; got += r; }
     if (!OriginOk(origin)) { Reply(s, 403, "", "{}"); return; }
     if (method == "OPTIONS") { Reply(s, 204, origin, ""); return; }
-    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":9,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
+    if (path.StartsWith("/ping")) { Reply(s, 200, origin, "{\"app\":\"retitra-subtitles\",\"v\":10,\"visible\":" + (Visible && !dismissed ? "true" : "false") + "}"); return; }
     if (method == "POST" && path.StartsWith("/show")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { dismissed = false; Show(); TopMost = true; Render(); }); return; }
     if (method == "POST" && path.StartsWith("/quit")) { Reply(s, 200, origin, "{\"ok\":true}"); BeginInvoke((MethodInvoker)delegate { Application.Exit(); }); return; }
     if (method == "POST" && path.StartsWith("/captions")) {
@@ -431,6 +475,37 @@ public class RetiTraOverlay : Form {
   public static bool PortFree() {
     try { TcpListener t = new TcpListener(IPAddress.Loopback, PORT); t.Start(); t.Stop(); return true; } catch { return false; }
   }
+}
+
+// Split screen with a fullscreen video: a black, click-through window over the screen that shows a live,
+// scaled copy of the video window in the free part. It never takes the keyboard (keys go to the video), and
+// it counts as opaque, so the browser still sees its window as visible and keeps playing.
+public class RetiTraStage : Form {
+  [DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+  [DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumb);
+  [DllImport("dwmapi.dll")] static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref TP p);
+  [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, int key, byte alpha, int flags);
+  [StructLayout(LayoutKind.Sequential)] struct R4 { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] struct TP { public int flags; public R4 dst; public R4 src; public byte opacity; public int visible; public int clientOnly; }
+  IntPtr thumb = IntPtr.Zero; Rectangle placed = Rectangle.Empty;
+  public RetiTraStage() {
+    Text = "RetiTra split screen"; FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false;
+    TopMost = true; BackColor = Color.Black; StartPosition = FormStartPosition.Manual;
+  }
+  protected override CreateParams CreateParams {
+    get { CreateParams cp = base.CreateParams; cp.ExStyle |= 0x80 | 0x08000000 | 0x20 | 0x80000; return cp; } // tool, no-activate, click-through, layered
+  }
+  protected override bool ShowWithoutActivation { get { return true; } }
+  protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); SetLayeredWindowAttributes(Handle, 0, 255, 2); }
+  public void Attach(IntPtr src) { Detach(); DwmRegisterThumbnail(Handle, src, out thumb); placed = Rectangle.Empty; }
+  public void Place(Rectangle d) {
+    if (thumb == IntPtr.Zero || d == placed) return;
+    placed = d;
+    TP p = new TP(); p.flags = 0x1 | 0x4 | 0x8 | 0x10; // destination, opacity, visible, whole window
+    p.dst.L = d.Left; p.dst.T = d.Top; p.dst.R = d.Right; p.dst.B = d.Bottom; p.opacity = 255; p.visible = 1;
+    DwmUpdateThumbnailProperties(thumb, ref p);
+  }
+  public void Detach() { if (thumb != IntPtr.Zero) { DwmUnregisterThumbnail(thumb); thumb = IntPtr.Zero; } placed = Rectangle.Empty; }
 }
 "@
 
