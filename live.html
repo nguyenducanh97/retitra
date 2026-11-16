@@ -65,6 +65,12 @@
     position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 3;
     background: var(--accent); color: #001018; border: none; font-weight: 600; box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
   }
+  /* Battery saver: pure black (OLED screens use almost no power for black), newest line in dim text. */
+  #blackout { position: fixed; inset: 0; z-index: 20; background: #000; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: 18px; padding: 24px; cursor: pointer; }
+  #blackout[hidden] { display: none; }
+  #boLine { color: #6b6b6b; font-size: calc(var(--size) * 0.95); line-height: 1.4; text-align: center; max-width: 34em; }
+  #boHint { color: #333; font-size: 12px; position: absolute; bottom: calc(18px + env(safe-area-inset-bottom)); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
 </head>
@@ -85,8 +91,13 @@
     <button id="orig" aria-pressed="true">Original</button>
     <button id="smaller" aria-label="Smaller text">A−</button>
     <button id="bigger" aria-label="Larger text">A+</button>
+    <button id="black" aria-label="Black screen to save battery">Black screen</button>
   </footer>
   <div class="sr" aria-live="polite" id="announce"></div>
+  <div id="blackout" hidden>
+    <div id="boLine"></div>
+    <div id="boHint">Black screen saves battery. Tap to return.</div>
+  </div>
 
 <script>
 (() => {
@@ -168,6 +179,7 @@
     if (m.title) document.title = m.title + " · RetiTra";
     applyOrig();
     fillVoices();
+    updateBlackout();
     if (follow) main.scrollTop = main.scrollHeight;
     speakTick();
   }
@@ -277,6 +289,14 @@
       keepAwake();
     }
   };
+  $("black").onclick = () => { $("blackout").hidden = false; updateBlackout(); keepAwake(); };
+  $("blackout").onclick = () => { $("blackout").hidden = true; };
+  function updateBlackout() {
+    if ($("blackout").hidden) return;
+    const lines = cleanLines();
+    const id = Object.keys(lines).map(Number).sort((a, b) => b - a).find((k) => textOf(lines[k]));
+    $("boLine").textContent = id != null ? lines[id].t : "Waiting for the presenter…";
+  }
   synth?.addEventListener?.("voiceschanged", () => fillVoices());
   $("voice").onchange = (e) => {
     const lang = BCP[state.meta?.target] || state.meta?.target || "";
@@ -298,6 +318,8 @@
   // start exactly where the previous one ends: no gaps, natural speed and pitch. A buffer (0.5 s, growing to
   // 2 s if the network turns out to be late) absorbs jitter; if the voice is more than 12 s behind, the waiting speech is skipped.
   let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0, aRsPos = 0, aRsLast = 0;
+  let aOut = null, aMedia = null; // where the voice goes: the phone's media player when possible
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
   const ULAW = (() => {
     const t = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -336,7 +358,7 @@
     if (aNext - now > 12) { for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + aBuf; }
     const src = actx.createBufferSource();
     src.buffer = buf;
-    src.connect(actx.destination);
+    src.connect(aOut || actx.destination);
     src.start(aNext);
     aNext += buf.duration;
     aQueued.push(src);
@@ -359,6 +381,18 @@
     aSilent.play().catch(() => {});
     actx ||= new (window.AudioContext || window.webkitAudioContext)(); // the phone's own rate
     actx.resume();
+    // Android/desktop: the voice is played through a media element (like a music player), so the phone keeps
+    // playing it with the screen off and shows lock-screen controls. (iPhone stops web audio when locked
+    // whatever is done, and its media element can't play this stream reliably: it keeps the direct output.)
+    if (!IOS && !aMedia && actx.createMediaStreamDestination) {
+      try {
+        const dest = actx.createMediaStreamDestination();
+        aMedia = new Audio();
+        aMedia.srcObject = dest.stream;
+        aMedia.play().then(() => { aOut = dest; aSilent?.pause(); }).catch(() => { aOut = null; aMedia = null; });
+      } catch { aOut = null; aMedia = null; }
+    } else if (aMedia) aMedia.play().catch(() => {});
+    mediaSessionOn(true);
     const b = actx.createBuffer(1, 256, actx.sampleRate), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
     if (aes) return;
     let skip = true; // audio already on the server when joining is old: start with what comes next
@@ -391,6 +425,23 @@
     for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } }
     aes = null; aNext = 0; aQueued = [];
     aSilent?.pause();
+    aMedia?.pause();
+    mediaSessionOn(false);
+  }
+  // Lock-screen / notification controls ("RetiTra live voice"), with pause and play.
+  function mediaSessionOn(on) {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    try {
+      if (on) {
+        const m = state.meta || {};
+        ms.metadata = new MediaMetadata({ title: m.title || "Live translation", artist: "RetiTra live voice", album: m.targetName || "" });
+        ms.setActionHandler("pause", () => { if (speakOn) $("speak").click(); });
+        ms.setActionHandler("stop", () => { if (speakOn) $("speak").click(); });
+        ms.setActionHandler("play", () => { if (!speakOn) $("speak").click(); });
+      }
+      ms.playbackState = on ? "playing" : "paused";
+    } catch { /* older browsers */ }
   }
 
 
@@ -414,7 +465,7 @@
   // If nothing has arrived after 4 s, the page switches to asking for changes about 3 times a second with
   // ordinary requests, which those networks let through.
   let es = null, lastEvent = 0, gotData = false, polling = false, pollTimer = 0, fallbackTimer = 0;
-  window.__rtv = () => ({ polling, gotData, lastEvent }); // (for tests)
+  window.__rtv = () => ({ polling, gotData, lastEvent, route: aOut ? "media" : "direct", media: !!aMedia && !aMedia.paused }); // (for tests)
   function connect() {
     if (!room) { status("bad", "No meeting code"); render(); return; }
     if (polling) return;
