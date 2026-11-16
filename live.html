@@ -297,7 +297,7 @@
   // whole phrase at once). Like "Speak translation" on the website, each piece is scheduled with Web Audio to
   // start exactly where the previous one ends: no gaps, natural speed and pitch. A buffer (0.5 s, growing to
   // 2 s if the network turns out to be late) absorbs jitter; if the voice is more than 12 s behind, the waiting speech is skipped.
-  let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0;
+  let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0, aRsPos = 0, aRsLast = 0;
   const ULAW = (() => {
     const t = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -311,8 +311,20 @@
     if (!actx) return;
     const bin = atob(b64), n = bin.length;
     if (!n) return;
-    const buf = actx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
-    for (let i = 0; i < n; i++) ch[i] = ULAW[bin.charCodeAt(i)];
+    // Converted here from Gemini's 24 kHz to the phone's own rate, continuously from piece to piece (the
+    // interpolation carries over the last sample and position), so there are no seams. Asking the phone to
+    // run its audio at 24 kHz instead made some phones play slowed down, or not at all.
+    const R = actx.sampleRate, step = 24000 / R;
+    const y = new Float32Array(n + 1);
+    y[0] = aRsLast;
+    for (let i = 0; i < n; i++) y[i + 1] = ULAW[bin.charCodeAt(i)];
+    const out = new Float32Array(Math.ceil((n - aRsPos) / step) + 1);
+    let k = 0, pos = aRsPos;
+    for (; pos < n; pos += step) { const i = Math.floor(pos), f = pos - i; out[k++] = y[i] * (1 - f) + y[i + 1] * f; }
+    aRsPos = pos - n; aRsLast = y[n];
+    if (!k) return;
+    const buf = actx.createBuffer(1, k, R);
+    buf.getChannelData(0).set(out.subarray(0, k));
     const now = actx.currentTime, at = performance.now();
     if (aNext < now + 0.05) {
       // The voice ran out. If pieces were still streaming (the last one came under 1.2 s ago), the network was
@@ -329,7 +341,7 @@
     aNext += buf.duration;
     aQueued.push(src);
     src.onended = () => { aQueued = aQueued.filter((x) => x !== src); };
-    const log = (window.__ai ||= []); if (log.length < 600) log.push([Date.now() % 100000, +(aNext - now).toFixed(2), aBuf, n]); // (timing, for tests)
+    const log = (window.__ai ||= []); if (log.length < 600) log.push([Date.now() % 100000, +(aNext - now).toFixed(2), aBuf, n, R]); // (timing, for tests)
     $("statusText").textContent = "Live · voice";
   }
   function silentWav() { // 1 s of silence, looped on an <audio> element: keeps iPhone audio in "playback" mode
@@ -345,12 +357,12 @@
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch { /* older Safari */ }
     if (!aSilent) { aSilent = new Audio(silentWav()); aSilent.loop = true; }
     aSilent.play().catch(() => {});
-    // Played at Gemini's own rate (24 kHz), so the pieces join sample-exactly with no conversion.
-    if (!actx) { const AC = window.AudioContext || window.webkitAudioContext; try { actx = new AC({ sampleRate: 24000 }); } catch { actx = new AC(); } }
+    actx ||= new (window.AudioContext || window.webkitAudioContext)(); // the phone's own rate
     actx.resume();
-    const b = actx.createBuffer(1, 240, 24000), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
+    const b = actx.createBuffer(1, 256, actx.sampleRate), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
     if (aes) return;
     let skip = true; // audio already on the server when joining is old: start with what comes next
+    if (polling) { aes = { close() { clearTimeout(aPollT); aes = null; } }; aiPoll(true); return; }
     aes = new EventSource(`${DB}/rooms/${room}-a/c.json`);
     const take = (k, v) => { if (typeof v === "string" && k > aLast) { aLast = k; if (!skip) aiPlay(v); } };
     aes.addEventListener("put", (e) => {
@@ -363,6 +375,16 @@
       for (const k of Object.keys(data || {}).sort()) take(k.replace(/^.*\//, ""), data[k]);
     });
     aes.onerror = () => { /* EventSource reconnects by itself */ };
+  }
+  // Slow network mode: new audio pieces fetched with ordinary requests about every 0.3 s.
+  let aPollT = 0;
+  async function aiPoll(first) {
+    if (!aes) return;
+    try {
+      const data = await getJson(`${DB}/rooms/${room}-a/c.json?` + (first ? q({ orderBy: "$key", limitToLast: 1 }) : q({ orderBy: "$key", startAt: aLast ? aLast + "~" : "a" })));
+      for (const k of Object.keys(data || {}).sort()) if (k > aLast) { aLast = k; if (!first) aiPlay(data[k]); }
+    } catch { /* retry */ }
+    if (aes) aPollT = setTimeout(() => aiPoll(false), 300);
   }
   function aiStop() {
     try { aes?.close(); } catch { /* closed */ }
@@ -387,28 +409,75 @@
     const last = parts[parts.length - 1];
     if (data === null) delete o[last]; else o[last] = data;
   }
-  let es = null, lastEvent = 0;
+  // The live stream (server-sent events) normally delivers every change at once. Some networks and in-app
+  // browsers (KakaoTalk, Zalo, Facebook...) hold such streams back, and the page then stayed on "Connecting...".
+  // If nothing has arrived after 4 s, the page switches to asking for changes about 3 times a second with
+  // ordinary requests, which those networks let through.
+  let es = null, lastEvent = 0, gotData = false, polling = false, pollTimer = 0, fallbackTimer = 0;
+  window.__rtv = () => ({ polling, gotData, lastEvent }); // (for tests)
   function connect() {
     if (!room) { status("bad", "No meeting code"); render(); return; }
+    if (polling) return;
     try { es?.close(); } catch { /* closed */ }
     es = new EventSource(`${DB}/rooms/${room}.json`);
     const touch = () => { lastEvent = Date.now(); };
     es.addEventListener("put", (e) => {
-      touch();
+      touch(); gotData = true;
       const { path, data } = JSON.parse(e.data);
       setPath(path, data);
       render(); showLive();
     });
     es.addEventListener("patch", (e) => {
-      touch();
+      touch(); gotData = true;
       const { path, data } = JSON.parse(e.data);
       for (const [k, v] of Object.entries(data || {})) setPath(path.replace(/\/$/, "") + "/" + k, v);
       render(); showLive();
     });
     es.addEventListener("keep-alive", touch);
     es.addEventListener("cancel", () => { status("bad", "Meeting not available"); });
-    es.onerror = () => { status("bad", "Reconnecting…"); };
+    es.onerror = () => { if (!polling) status("bad", "Reconnecting…"); };
     es.onopen = touch;
+    clearTimeout(fallbackTimer);
+    fallbackTimer = setTimeout(() => { if (!gotData) startPolling(); }, 4000);
+  }
+  const q = (o) => Object.entries(o).map(([k, v]) => k + "=" + encodeURIComponent(JSON.stringify(v))).join("&");
+  async function getJson(url) { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error(r.status); return r.json(); }
+  function startPolling() {
+    if (polling) return;
+    polling = true;
+    try { es?.close(); } catch { /* closed */ }
+    es = null;
+    status("bad", "Connecting (slow network mode)…");
+    if (aes) { aiStop(); aiStart(); } // the voice switches too
+    poll();
+  }
+  async function poll() {
+    clearTimeout(pollTimer);
+    try {
+      // The meeting info and the latest 80 lines (older lines stay on the page).
+      const [owner, meta, lines] = await Promise.all([
+        getJson(`${DB}/rooms/${room}/owner.json`),
+        getJson(`${DB}/rooms/${room}/meta.json`),
+        getJson(`${DB}/rooms/${room}/lines.json?${q({ orderBy: "$key", limitToLast: 80 })}`),
+      ]);
+      lastEvent = Date.now(); gotData = true;
+      state.owner = owner; state.meta = meta || {};
+      if (!owner) state.lines = {};
+      else {
+        state.lines ||= {};
+        const got = lines || {};
+        const keys = Object.keys(got);
+        const lo = keys.sort()[0];
+        // Lines inside the fetched range that are gone were removed by the presenter.
+        for (const k of Object.keys(state.lines)) if (lo && k >= lo && !(k in got)) delete state.lines[k];
+        Object.assign(state.lines, got);
+      }
+      render(); showLive();
+      if (state.owner) $("statusText").textContent += " (slow network mode)";
+    } catch {
+      status("bad", "Reconnecting (slow network mode)…");
+    }
+    pollTimer = setTimeout(poll, document.hidden ? 2000 : 350);
   }
   function showLive() {
     const m = state.meta || {};
@@ -421,7 +490,7 @@
   setInterval(() => { if (lastEvent && Date.now() - lastEvent > 65000) connect(); }, 15000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - lastEvent > 20000) connect(); });
   window.addEventListener("hashchange", () => location.reload());
-  connect();
+  if (/[?&]poll/.test(location.search)) startPolling(); else connect(); // (?poll: test the slow network mode)
 })();
 </script>
 </body>
