@@ -81,7 +81,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1117-10</span>
+    <span class="build" title="Version of this page">1117-11</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -386,7 +386,7 @@
     aiSchedule(x);
     // At the end of a phrase, the stretcher's last 40 ms are pushed out with a little silence.
     clearTimeout(aFlushT);
-    aFlushT = setTimeout(() => aiSchedule(new Float32Array(2400), true), 300);
+    aFlushT = setTimeout(() => aiSchedule(new Float32Array(1300), true), 300); // (just enough to push out the last 40 ms)
   }
   function aiSchedule(x24, flush = false) {
     const now0 = actx.currentTime;
@@ -412,6 +412,7 @@
     const now = actx.currentTime, at = performance.now();
     if (aNext < now + 0.05) {
       if (flush) return; // nothing playing: no need to play the padding
+      if (aNext) (window.__gaps ||= []).push(+(now - aNext).toFixed(2)); // (silence before this piece, for tests)
       // The voice ran out. If pieces were still streaming (the last one came under 1.2 s ago), the network was
       // late: keep a bigger buffer from now on (0.5 s at first, up to 2 s). Otherwise it is a new sentence.
       if (at - aLastAt < 1200) aBuf = Math.min(2, aBuf + 0.3);
