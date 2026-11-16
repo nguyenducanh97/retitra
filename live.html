@@ -295,9 +295,9 @@
   // ---- AI interpreter voice: the translation model's own speech, streamed from the presenter's laptop ----
   // Pieces of 16 kHz mu-law audio arrive about every 0.2 s (in Fast at real-time speed; in Balanced/Accurate a
   // whole phrase at once). Like "Speak translation" on the website, each piece is scheduled with Web Audio to
-  // start exactly where the previous one ends: no gaps, natural speed and pitch. A short buffer (0.4 s) absorbs
-  // network jitter; if the voice is more than 12 s behind, the waiting speech is skipped.
-  let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null;
+  // start exactly where the previous one ends: no gaps, natural speed and pitch. A buffer (0.5 s, growing to
+  // 2 s if the network turns out to be late) absorbs jitter; if the voice is more than 12 s behind, the waiting speech is skipped.
+  let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0;
   const ULAW = (() => {
     const t = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -313,9 +313,15 @@
     if (!n) return;
     const buf = actx.createBuffer(1, n, 16000), ch = buf.getChannelData(0);
     for (let i = 0; i < n; i++) ch[i] = ULAW[bin.charCodeAt(i)];
-    const now = actx.currentTime;
-    if (aNext < now + 0.05) aNext = now + 0.4; // (re)starting after a gap: a little buffer first
-    if (aNext - now > 12) { for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + 0.4; }
+    const now = actx.currentTime, at = performance.now();
+    if (aNext < now + 0.05) {
+      // The voice ran out. If pieces were still streaming (the last one came under 1.2 s ago), the network was
+      // late: keep a bigger buffer from now on (0.5 s at first, up to 2 s). Otherwise it is a new sentence.
+      if (at - aLastAt < 1200) aBuf = Math.min(2, aBuf + 0.3);
+      aNext = now + aBuf;
+    }
+    aLastAt = at;
+    if (aNext - now > 12) { for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + aBuf; }
     const src = actx.createBufferSource();
     src.buffer = buf;
     src.connect(actx.destination);
@@ -323,7 +329,7 @@
     aNext += buf.duration;
     aQueued.push(src);
     src.onended = () => { aQueued = aQueued.filter((x) => x !== src); };
-    const log = (window.__ai ||= []); if (log.length < 600) log.push([Date.now() % 100000, +(aNext - now).toFixed(2)]); // (timing, for tests)
+    const log = (window.__ai ||= []); if (log.length < 600) log.push([Date.now() % 100000, +(aNext - now).toFixed(2), aBuf, n]); // (timing, for tests)
     $("statusText").textContent = "Live · voice";
   }
   function silentWav() { // 1 s of silence, looped on an <audio> element: keeps iPhone audio in "playback" mode
