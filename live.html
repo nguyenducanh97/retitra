@@ -81,7 +81,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1117-11</span>
+    <span class="build" title="Version of this page">1117-12</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -318,50 +318,22 @@
   let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0, aRsPos = 0, aRsLast = 0;
   let aOut = null, aMedia = null; // where the voice goes: the phone's media player when possible
   const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  // Streaming time-stretch for speech that keeps the pitch (WSOLA: overlap-add of 40 ms windows, each taken
-  // where it best continues the previous one). push(samples, rate) returns the stretched samples so far.
-  // rate 1 = natural speed, 1.3 = 30% faster. Used to let the voice catch up with the text without sounding
-  // higher or squeaky (playing faster would raise the pitch).
-  function makeStretcher(sr = 24000) {
-    const N = Math.round(sr * 0.04), Ha = N >> 1, D = Math.round(sr * 0.01); // frame, output hop, search range
-    const win = new Float32Array(N);
-    for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N);
-    let buf = new Float32Array(0), pos = 0, prev = -1, tail = new Float32Array(Ha);
-    return {
-      push(x, rate) {
-        const nb = new Float32Array(buf.length + x.length);
-        nb.set(buf); nb.set(x, buf.length); buf = nb;
-        const out = [];
-        const Hs = Ha * rate;
-        while (true) {
-          const p = Math.round(pos);
-          if (p + D + N >= buf.length) break;
-          let best = p;
-          if (prev >= 0) {
-            // The natural continuation of the previous window; pick the nearby window that matches it best.
-            const nat = prev + Ha;
-            let bestC = -Infinity;
-            for (let d = Math.max(-D, -p); d <= D; d += 2) {
-              const q = p + d;
-              let c = 0;
-              for (let i = 0; i < Ha; i += 2) c += buf[q + i] * buf[nat + i];
-              if (c > bestC) { bestC = c; best = q; }
-            }
-          }
-          const frame = new Float32Array(Ha);
-          for (let i = 0; i < Ha; i++) frame[i] = tail[i] + buf[best + i] * win[i];
-          for (let i = 0; i < Ha; i++) tail[i] = buf[best + Ha + i] * win[Ha + i];
-          out.push(frame);
-          prev = best; pos += Hs;
-        }
-        // Drop what is no longer needed (keep a margin for the search).
-        const keep = Math.max(0, Math.min(Math.floor(pos) - D, (prev >= 0 ? prev : 0)) - 4);
-        if (keep > 0) { buf = buf.slice(keep); pos -= keep; if (prev >= 0) prev -= keep; }
-        const len = out.reduce((s, f) => s + f.length, 0), res = new Float32Array(len);
-        let o = 0; for (const f of out) { res.set(f, o); o += f.length; }
-        return res;
-      },
-    };
+  // Catching up without touching the voice: pauses (10 ms frames below a quiet level) longer than 0.1 s are cut
+  // down to 0.1 s; the speech itself is played exactly as Gemini made it. (A time-stretch kept the pitch on paper
+  // but made the voice sound warbly and unnatural.)
+  function shrinkSilence(x, sr, keepMs = 100) {
+    const F = Math.round(sr / 100), keep = Math.round(keepMs / 10);
+    const out = new Float32Array(x.length);
+    let o = 0, quiet = 0;
+    for (let s = 0; s < x.length; s += F) {
+      const e = Math.min(x.length, s + F);
+      let sum = 0; for (let i = s; i < e; i++) sum += x[i] * x[i];
+      const silent = Math.sqrt(sum / (e - s)) < 0.006;
+      quiet = silent ? quiet + 1 : 0;
+      if (silent && quiet > keep) continue;
+      out.set(x.subarray(s, e), o); o += e - s;
+    }
+    return out.subarray(0, o);
   }
   const ULAW = (() => {
     const t = new Float32Array(256);
@@ -372,11 +344,9 @@
     }
     return t;
   })();
-  // Speed adapts to how far behind the voice is: natural speed when it is current, then gradually faster (up to
-  // 1.4x at 5.5 s behind) with the pitch kept (time-stretch), so it catches up with the text instead of
-  // skipping it. Only more than 15 s behind is the waiting speech skipped.
-  let aStretch = null, aRate = 1, aFlushT = 0;
-  const targetRate = (behind) => behind < 1.5 ? 1 : Math.min(1.6, 1 + (behind - 1.5) * 0.1); // 1.4x at 5.5 s, 1.6x at 7.5 s+
+  // Gemini's voice is played exactly as it comes (no speed change). When it is more than 2 s behind, the pauses
+  // in it are shortened so it catches up; only beyond 15 s behind is waiting speech skipped.
+  let aFlushT = 0;
   function aiPlay(b64) {
     if (!actx) return;
     const bin = atob(b64), n = bin.length;
@@ -384,16 +354,10 @@
     const x = new Float32Array(n);
     for (let i = 0; i < n; i++) x[i] = ULAW[bin.charCodeAt(i)];
     aiSchedule(x);
-    // At the end of a phrase, the stretcher's last 40 ms are pushed out with a little silence.
-    clearTimeout(aFlushT);
-    aFlushT = setTimeout(() => aiSchedule(new Float32Array(1300), true), 300); // (just enough to push out the last 40 ms)
   }
   function aiSchedule(x24, flush = false) {
-    const now0 = actx.currentTime;
-    const behind = Math.max(0, aNext - now0);
-    aRate += (targetRate(behind) - aRate) * 0.3; // change speed gently
-    aStretch ||= makeStretcher(24000);
-    const st = aStretch.push(x24, aRate);
+    const behind = Math.max(0, aNext - actx.currentTime);
+    const st = behind > 2 ? shrinkSilence(x24, 24000) : x24;
     const n = st.length;
     if (!n) return;
     // Converted from 24 kHz to the phone's own rate, continuously from piece to piece (the interpolation
@@ -427,7 +391,7 @@
     aNext += buf.duration;
     aQueued.push(src);
     src.onended = () => { aQueued = aQueued.filter((q) => q !== src); };
-    const log = (window.__ai ||= []); if (log.length < 600 && !flush) log.push([Date.now() % 100000, +(aNext - now).toFixed(2), aBuf, x24.length, R, +aRate.toFixed(2)]); // (timing, for tests)
+    const log = (window.__ai ||= []); if (log.length < 600 && !flush) log.push([Date.now() % 100000, +(aNext - now).toFixed(2), aBuf, x24.length, R, n]); // (timing, for tests)
     $("statusText").textContent = "Live · voice";
   }
   function silentWav() { // 1 s of silence, looped on an <audio> element: keeps iPhone audio in "playback" mode
@@ -487,7 +451,7 @@
   function aiStop() {
     try { aes?.close(); } catch { /* closed */ }
     for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } }
-    aes = null; aNext = 0; aQueued = []; aStretch = null; aRate = 1;
+    aes = null; aNext = 0; aQueued = [];
     aSilent?.pause();
     aMedia?.pause();
     mediaSessionOn(false);
