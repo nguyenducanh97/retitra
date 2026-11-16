@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex" />
+<meta name="theme-color" content="#05070f" />
+<title>RetiTra · Live captions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+KR:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #05070f; --panel: rgb(14 20 38 / 85%); --border: rgb(120 160 255 / 18%);
+    --text: #e8eeff; --muted: #8fa1cf; --trans: #ffffff; --accent: #22d3ee; --ok: #34f5c5; --warn: #fbbf24;
+    --size: 22px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f3f6fc; --panel: rgb(255 255 255 / 92%); --border: rgb(40 70 150 / 15%);
+      --text: #0f172a; --muted: #5a6784; --trans: #0b1220; --accent: #0891b2; --ok: #059669; --warn: #b45309;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(900px 600px at 80% -10%, rgb(34 211 238 / 10%), transparent 60%), var(--bg);
+    color: var(--text); font: 16px/1.5 "Inter", "Noto Sans KR", system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; -webkit-font-smoothing: antialiased;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 10px; background: var(--panel); border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+  .brand { font-weight: 600; letter-spacing: -0.01em; }
+  .brand em { font-style: normal; color: var(--accent); }
+  .title { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .status i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status.live i { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .status.bad i { background: var(--warn); }
+  main { flex: 1; overflow-y: auto; padding: 14px 16px 40vh; -webkit-overflow-scrolling: touch; }
+  .line { padding: 10px 0 12px; border-bottom: 1px solid var(--border); }
+  .line .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .line .o { color: var(--muted); font-size: calc(var(--size) * 0.7); line-height: 1.4; }
+  .line .t { color: var(--trans); font-size: var(--size); font-weight: 500; line-height: 1.38; margin-top: 2px; }
+  .line .t.wait { color: var(--muted); font-style: italic; font-size: calc(var(--size) * 0.6); font-weight: 400; }
+  .line.old { opacity: 0.6; }
+  body.no-orig .line .o { display: none; }
+  .empty { color: var(--muted); text-align: center; margin: 18vh 12px; font-size: 15px; }
+  footer {
+    position: sticky; bottom: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--panel); border-top: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+  button {
+    font: inherit; font-size: 14px; color: var(--text); background: transparent; border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 12px; cursor: pointer; min-height: 42px;
+  }
+  button.on { border-color: var(--ok); color: var(--ok); }
+  #speak { flex: 1; min-width: 150px; font-weight: 600; }
+  #voice { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 5; }
+  .jump {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + env(safe-area-inset-bottom)); z-index: 3;
+    background: var(--accent); color: #001018; border: none; font-weight: 600; box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
+  }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="brand">Re<em>ti</em>Tra</span>
+    <span class="title" id="title">Live captions</span>
+    <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
+  </header>
+  <main id="main" aria-label="Live captions">
+    <p class="empty" id="empty">Waiting for the presenter…</p>
+    <div id="lines"></div>
+  </main>
+  <button class="jump" id="jump" hidden>Jump to latest</button>
+  <footer>
+    <button id="speak" aria-pressed="false">Read aloud: off</button>
+    <select id="voice" aria-label="Voice" hidden></select>
+    <button id="orig" aria-pressed="true">Original</button>
+    <button id="smaller" aria-label="Smaller text">A−</button>
+    <button id="bigger" aria-label="Larger text">A+</button>
+  </footer>
+  <div class="sr" aria-live="polite" id="announce"></div>
+
+<script>
+(() => {
+  const DB = "https://retitra-live-default-rtdb.asia-southeast1.firebasedatabase.app";
+  const room = (location.hash.slice(1) || new URLSearchParams(location.search).get("room") || "").replace(/[^a-z0-9]/gi, "");
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("rtv." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("rtv." + k, JSON.stringify(v)); } catch { /* private mode */ } },
+  };
+  let state = {}; // { owner, meta: {...}, lines: { sid: { o, t, s, c, w, f } } }
+  const els = new Map(); // sid -> { el, json }
+
+  // ---- text size and original toggle (this phone only) ----
+  let size = store.get("size", 22);
+  const setSize = (px) => { size = Math.max(14, Math.min(44, px)); document.documentElement.style.setProperty("--size", size + "px"); store.set("size", size); };
+  setSize(size);
+  $("smaller").onclick = () => setSize(size - 2);
+  $("bigger").onclick = () => setSize(size + 2);
+  let showOrig = store.get("orig", null); // null: follow the presenter's screen
+  const applyOrig = () => {
+    const on = showOrig ?? (state.meta?.showOriginal !== false);
+    document.body.classList.toggle("no-orig", !on);
+    $("orig").classList.toggle("on", on); $("orig").setAttribute("aria-pressed", String(on));
+  };
+  $("orig").onclick = () => { showOrig = document.body.classList.contains("no-orig"); store.set("orig", showOrig); applyOrig(); };
+
+  // ---- status ----
+  function status(kind, text) {
+    $("status").className = "status " + kind;
+    $("statusText").textContent = text;
+  }
+
+  // ---- rendering: only changed lines are touched; the view follows the newest line unless scrolled up ----
+  const main = $("main");
+  let follow = true;
+  main.addEventListener("scroll", () => {
+    follow = main.scrollHeight - main.scrollTop - main.clientHeight < 140;
+    $("jump").hidden = follow;
+  }, { passive: true });
+  $("jump").onclick = () => { follow = true; main.scrollTop = main.scrollHeight; $("jump").hidden = true; };
+  function render() {
+    const lines = cleanLines();
+    const ids = Object.keys(lines).map(Number).sort((a, b) => a - b);
+    $("empty").hidden = ids.length > 0;
+    if (!state.owner && !ids.length) $("empty").textContent = room ? "This meeting hasn't started yet, or it has ended." : "Scan the QR code on the screen to follow the meeting.";
+    else $("empty").textContent = "Waiting for the presenter…";
+    for (const [sid, rec] of els) if (!(sid in lines)) { rec.el.remove(); els.delete(sid); }
+    const box = $("lines");
+    let prev = null;
+    const lastT = ids.slice().reverse().find((id) => lines[id].t);
+    for (const id of ids) {
+      const l = lines[id], json = JSON.stringify(l);
+      let rec = els.get(String(id));
+      if (!rec) {
+        const el = document.createElement("div");
+        el.className = "line";
+        el.innerHTML = '<div class="who" hidden></div><div class="o"></div><div class="t"></div>';
+        rec = { el, json: "" };
+        els.set(String(id), rec);
+        if (prev) prev.after(el); else box.prepend(el);
+      }
+      if (rec.json !== json) {
+        if (!rec.json || JSON.parse(rec.json).t !== l.t) changedAt[id] = Date.now();
+        rec.json = json;
+        const who = rec.el.children[0], o = rec.el.children[1], t = rec.el.children[2];
+        who.hidden = !l.s; who.textContent = l.s || ""; who.style.color = l.c || "";
+        o.textContent = l.o || ""; o.hidden = !l.o;
+        t.textContent = l.w ? "translating…" : (l.t || "");
+        t.className = "t" + (l.w ? " wait" : "");
+      }
+      rec.el.classList.toggle("old", lastT != null && id < lastT - 1);
+      prev = rec.el;
+    }
+    // Keep the page light: only the last 300 lines stay on the page.
+    while (els.size > 300) { const [k, rec] = els.entries().next().value; rec.el.remove(); els.delete(k); }
+    const m = state.meta || {};
+    $("title").textContent = m.title || (m.targetName ? "Live captions · " + m.targetName : "Live captions");
+    if (m.title) document.title = m.title + " · RetiTra";
+    applyOrig();
+    fillVoices();
+    if (follow) main.scrollTop = main.scrollHeight;
+    speakTick();
+  }
+
+  // ---- read aloud with this phone's own voice, as soon as words arrive (not waiting for the sentence) ----
+  // A reading position (line, character) follows the text: whenever the voice is free, everything new up to
+  // the last complete word is spoken at once. A line still growing is read word by word as it grows; when the
+  // voice falls behind it speeds up, and far behind it skips to the newest line.
+  let speakOn = false, cur = null; // cur = { id, pos }
+  const changedAt = {};            // line id -> when its text last changed
+  const BCP = { en: "en-US", vi: "vi-VN", ko: "ko-KR", ja: "ja-JP", zh: "zh-CN", "zh-TW": "zh-TW", fr: "fr-FR", de: "de-DE", es: "es-ES",
+    pt: "pt-BR", ru: "ru-RU", th: "th-TH", id: "id-ID", ms: "ms-MY", hi: "hi-IN", ar: "ar-SA", it: "it-IT", nl: "nl-NL", tr: "tr-TR" };
+  const NO_SPACES = /^(ja|zh|th|zh-TW)$/;
+  const synth = window.speechSynthesis;
+  // Voices for the meeting's language, the most natural first: online/neural voices ("Microsoft HoaiMy Online
+  // (Natural)" in Edge, Google's online voices on Android/Chrome, "Enhanced"/"Premium" voices on iPhone) sound
+  // far more human than the basic offline ones.
+  function voicesFor(lang) {
+    const all = synth?.getVoices?.() || [];
+    const want = lang.toLowerCase(), base = want.split("-")[0];
+    const norm = (v) => v.lang.toLowerCase().replace("_", "-");
+    const score = (v) => (/natural|neural|online|enhanced|premium|wavenet|studio/i.test(v.name) ? 20 : 0) +
+      (v.localService === false ? 8 : 0) + (/google/i.test(v.name) ? 3 : 0) + (norm(v) === want ? 2 : 0) -
+      (/compact|espeak/i.test(v.name) ? 10 : 0);
+    return all.filter((v) => norm(v) === want || norm(v).split("-")[0] === base).sort((a, b) => score(b) - score(a));
+  }
+  function voiceFor(lang) {
+    const list = voicesFor(lang);
+    const chosen = store.get("voice." + lang, "");
+    return list.find((v) => v.name === chosen) || list[0] || null;
+  }
+  function fillVoices() {
+    const sel = $("voice"), lang = BCP[state.meta?.target] || state.meta?.target || "";
+    const list = lang ? voicesFor(lang) : [];
+    const key = lang + "|" + list.map((v) => v.name).join("|");
+    if (sel.dataset.key === key) return;
+    sel.dataset.key = key;
+    sel.replaceChildren(...list.map((v, i) => new Option((i === 0 ? "Best: " : "") + v.name.replace(/\s*-\s*.*$/, "").replace(/^Microsoft\s+/, ""), v.name)));
+    if (!list.length) sel.append(new Option("Phone's default voice", ""));
+    const chosen = store.get("voice." + lang, "");
+    if (list.some((v) => v.name === chosen)) sel.value = chosen;
+    sel.hidden = list.length < 2;
+  }
+  // Lines keyed "l<number>" (spoken order); empty entries skipped.
+  function cleanLines() {
+    const out = {};
+    for (const [k, v] of Object.entries(state.lines || {})) {
+      const n = Number(String(k).replace(/^l/, ""));
+      if (v && typeof v === "object" && Number.isFinite(n)) out[n] = v;
+    }
+    return out;
+  }
+  const textOf = (l) => (l && !l.w ? l.t || "" : "");
+  function speakTick() {
+    const lines = cleanLines();
+    const ids = Object.keys(lines).map(Number).sort((a, b) => a - b);
+    // Screen readers: each finished translation announced once.
+    for (const id of ids) if (lines[id].f && textOf(lines[id]) && id > (speakTick.announced ?? -1)) { $("announce").textContent = lines[id].t; speakTick.announced = id; }
+    if (!speakOn || !synth || !ids.length || synth.speaking || synth.pending) return;
+    if (!cur || !(cur.id in lines)) cur = { id: ids.find((id) => !cur || id >= cur.id) ?? ids[ids.length - 1], pos: 0 };
+    const lastId = ids[ids.length - 1], now = Date.now();
+    const noSpaces = NO_SPACES.test(state.meta?.target || "");
+    let say = "", backlog = 0;
+    for (let i = ids.indexOf(cur.id); i >= 0 && i < ids.length; i++) {
+      const id = ids[i], t = textOf(lines[id]);
+      if (id !== cur.id) cur = { id, pos: 0 };
+      if (cur.pos > t.length) cur.pos = t.length; // (text rewritten shorter)
+      const rest = t.slice(cur.pos);
+      const complete = lines[id].f || id < lastId || now - (changedAt[id] || 0) > 900;
+      let take = rest;
+      if (!complete && !noSpaces) { const k = rest.search(/\s\S*$/); take = k >= 0 ? rest.slice(0, k + 1) : ""; } // whole words only
+      if (take.trim()) say += (say ? " " : "") + take.trim();
+      cur.pos += take.length;
+      if (take.length < rest.length || lines[id].w) { backlog += rest.length - take.length; break; }
+      if (id === lastId) break;
+    }
+    // Far behind (a long backlog of unread text): jump to the newest line.
+    for (const id of ids) if (id > cur.id) backlog += textOf(lines[id]).length;
+    if (say.length > 450) { const lastLine = textOf(lines[cur.id]); say = lastLine.slice(0, cur.pos); }
+    if (!say.trim()) return;
+    const lang = BCP[state.meta?.target] || state.meta?.target || "";
+    const u = new SpeechSynthesisUtterance(say);
+    if (lang) { u.lang = lang; const v = voiceFor(lang); if (v) u.voice = v; }
+    u.rate = Math.min(1.6, 1 + Math.max(0, say.length - 60) / 300 + backlog / 400); // faster when text is waiting
+    u.onend = u.onerror = () => setTimeout(speakTick, 30);
+    synth.speak(u);
+  }
+  setInterval(speakTick, 250); // (a line that stops growing is finished off after 0.9 s)
+  $("speak").onclick = () => {
+    if (!synth) { alert("This browser can't read text aloud. Try Chrome or Safari."); return; }
+    speakOn = !speakOn;
+    $("speak").classList.toggle("on", speakOn);
+    $("speak").setAttribute("aria-pressed", String(speakOn));
+    $("speak").textContent = speakOn ? "Read aloud: on" : "Read aloud: off";
+    synth.cancel();
+    if (speakOn) {
+      // Start with the line being spoken now (not the whole backlog). A first utterance inside the tap
+      // unlocks speech on iPhone.
+      const ids = Object.keys(cleanLines()).map(Number).sort((a, b) => a - b);
+      cur = ids.length ? { id: ids[ids.length - 1], pos: 0 } : null;
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0; synth.speak(u);
+      setTimeout(speakTick, 60);
+      keepAwake();
+    }
+  };
+  synth?.addEventListener?.("voiceschanged", () => fillVoices());
+  $("voice").onchange = (e) => {
+    const lang = BCP[state.meta?.target] || state.meta?.target || "";
+    store.set("voice." + lang, e.target.value);
+    if (speakOn) { synth.cancel(); const u = new SpeechSynthesisUtterance(lang.startsWith("vi") ? "Xin chào" : lang.startsWith("ko") ? "안녕하세요" : "Hello"); u.lang = lang; const v = voiceFor(lang); if (v) u.voice = v; synth.speak(u); }
+  };
+
+  // Keep the screen on while following (where supported).
+  let wake = null;
+  async function keepAwake() { try { wake = await navigator.wakeLock?.request("screen"); } catch { /* not allowed */ } }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && (speakOn || wake)) keepAwake(); });
+  document.addEventListener("click", () => { if (!wake) keepAwake(); }, { once: true });
+
+  // ---- live connection: the database's streaming API (server-sent events) ----
+  function setPath(path, data) {
+    const parts = path.split("/").filter(Boolean);
+    if (!parts.length) { state = data && typeof data === "object" ? data : {}; return; }
+    let o = state;
+    for (let i = 0; i < parts.length - 1; i++) { if (typeof o[parts[i]] !== "object" || !o[parts[i]]) o[parts[i]] = {}; o = o[parts[i]]; }
+    const last = parts[parts.length - 1];
+    if (data === null) delete o[last]; else o[last] = data;
+  }
+  let es = null, lastEvent = 0;
+  function connect() {
+    if (!room) { status("bad", "No meeting code"); render(); return; }
+    try { es?.close(); } catch { /* closed */ }
+    es = new EventSource(`${DB}/rooms/${room}.json`);
+    const touch = () => { lastEvent = Date.now(); };
+    es.addEventListener("put", (e) => {
+      touch();
+      const { path, data } = JSON.parse(e.data);
+      setPath(path, data);
+      render(); showLive();
+    });
+    es.addEventListener("patch", (e) => {
+      touch();
+      const { path, data } = JSON.parse(e.data);
+      for (const [k, v] of Object.entries(data || {})) setPath(path.replace(/\/$/, "") + "/" + k, v);
+      render(); showLive();
+    });
+    es.addEventListener("keep-alive", touch);
+    es.addEventListener("cancel", () => { status("bad", "Meeting not available"); });
+    es.onerror = () => { status("bad", "Reconnecting…"); };
+    es.onopen = touch;
+  }
+  function showLive() {
+    const m = state.meta || {};
+    if (!state.owner) status("bad", "Not started / ended");
+    else if (m.paused) status("bad", "Paused");
+    else if (m.live) status("live", "Live");
+    else status("", "Not listening");
+  }
+  // A connection that went silent (phone slept, Wi-Fi changed) is reopened.
+  setInterval(() => { if (lastEvent && Date.now() - lastEvent > 65000) connect(); }, 15000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - lastEvent > 20000) connect(); });
+  window.addEventListener("hashchange", () => location.reload());
+  connect();
+})();
+</script>
+</body>
+</html>
