@@ -293,7 +293,7 @@
   };
 
   // ---- AI interpreter voice: the translation model's own speech, streamed from the presenter's laptop ----
-  // Pieces of 16 kHz mu-law audio arrive about every 0.2 s (in Fast at real-time speed; in Balanced/Accurate a
+  // Pieces of 24 kHz mu-law audio arrive about every 0.2 s (in Fast at real-time speed; in Balanced/Accurate a
   // whole phrase at once). Like "Speak translation" on the website, each piece is scheduled with Web Audio to
   // start exactly where the previous one ends: no gaps, natural speed and pitch. A buffer (0.5 s, growing to
   // 2 s if the network turns out to be late) absorbs jitter; if the voice is more than 12 s behind, the waiting speech is skipped.
@@ -311,7 +311,7 @@
     if (!actx) return;
     const bin = atob(b64), n = bin.length;
     if (!n) return;
-    const buf = actx.createBuffer(1, n, 16000), ch = buf.getChannelData(0);
+    const buf = actx.createBuffer(1, n, 24000), ch = buf.getChannelData(0);
     for (let i = 0; i < n; i++) ch[i] = ULAW[bin.charCodeAt(i)];
     const now = actx.currentTime, at = performance.now();
     if (aNext < now + 0.05) {
@@ -345,9 +345,10 @@
     try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch { /* older Safari */ }
     if (!aSilent) { aSilent = new Audio(silentWav()); aSilent.loop = true; }
     aSilent.play().catch(() => {});
-    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    // Played at Gemini's own rate (24 kHz), so the pieces join sample-exactly with no conversion.
+    if (!actx) { const AC = window.AudioContext || window.webkitAudioContext; try { actx = new AC({ sampleRate: 24000 }); } catch { actx = new AC(); } }
     actx.resume();
-    const b = actx.createBuffer(1, 160, 16000), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
+    const b = actx.createBuffer(1, 240, 24000), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
     if (aes) return;
     let skip = true; // audio already on the server when joining is old: start with what comes next
     aes = new EventSource(`${DB}/rooms/${room}-a/c.json`);
