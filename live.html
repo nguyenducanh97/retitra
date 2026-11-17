@@ -81,7 +81,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1117-12</span>
+    <span class="build" title="Version of this page">1117-13</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -345,7 +345,7 @@
     return t;
   })();
   // Gemini's voice is played exactly as it comes (no speed change). When it is more than 2 s behind, the pauses
-  // in it are shortened so it catches up; only beyond 15 s behind is waiting speech skipped.
+  // in it are shortened so it catches up; only beyond 25 s behind is waiting speech skipped.
   let aFlushT = 0;
   function aiPlay(b64) {
     if (!actx) return;
@@ -383,7 +383,7 @@
       aNext = now + aBuf;
     }
     if (!flush) aLastAt = at;
-    if (aNext - now > 15) { (window.__skips ||= []).push([Date.now() % 100000, +(aNext - now).toFixed(1)]); for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + aBuf; }
+    if (aNext - now > 25) { (window.__skips ||= []).push([Date.now() % 100000, +(aNext - now).toFixed(1)]); for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + aBuf; }
     const src = actx.createBufferSource();
     src.buffer = buf;
     src.connect(aOut || actx.destination);
