@@ -61,6 +61,8 @@
   }
   button.on { border-color: var(--ok); color: var(--ok); }
   #speak { flex: 1; min-width: 150px; font-weight: 600; }
+  #show { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 4; }
   #voice { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
     border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 5; }
   .jump {
@@ -81,7 +83,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1118-4</span>
+    <span class="build" title="Version of this page">1119-1</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -90,6 +92,7 @@
   <button class="jump" id="jump" hidden>Jump to latest</button>
   <footer>
     <button id="speak" aria-pressed="false">Read aloud: off</button>
+    <select id="show" aria-label="Languages shown" hidden></select>
     <select id="voice" aria-label="Voice" hidden></select>
     <button id="smaller" aria-label="Smaller text">A−</button>
     <button id="bigger" aria-label="Larger text">A+</button>
@@ -119,8 +122,29 @@
   setSize(size);
   $("smaller").onclick = () => setSize(size - 2);
   $("bigger").onclick = () => setSize(size + 2);
-  // Phones show the translation only (the original is not shown).
-  const applyOrig = () => document.body.classList.add("no-orig");
+  // One-way: phones show the translation only. Two-way (the meeting has a language pair): by default the same as
+  // the monitor (each line's original, small, and its translation), or only one language: the original where it
+  // was said in that language, the translation where it wasn't (before, phones showed only the translations:
+  // the Korean speaker's lines in English and the English speaker's in Korean).
+  const show = () => { const p = state.meta?.pair; if (!p) return "one"; const v = store.get("show", "both"); return v === "both" || p.some((x) => x.c === v) ? v : "both"; };
+  function view(l) {
+    const sh = show();
+    if (sh === "both") return { o: l.o || "", t: l.t || "", w: l.w, lang: l.tl || "" };
+    if (sh === "one") return { o: "", t: l.t || "", w: l.w, lang: state.meta?.target || "" };
+    if (l.ol === sh) return { o: "", t: l.o || "", w: 0, lang: sh };
+    return { o: "", t: l.t || "", w: l.w, lang: sh };
+  }
+  const applyOrig = () => document.body.classList.toggle("no-orig", show() !== "both");
+  function fillShow() {
+    const sel = $("show"), p = state.meta?.pair;
+    const key = p ? p.map((x) => x.c + x.n).join("|") : "";
+    sel.hidden = !p;
+    if (!p || sel.dataset.key === key) return;
+    sel.dataset.key = key;
+    sel.replaceChildren(new Option("Both languages (as on the screen)", "both"), ...p.map((x) => new Option("Only " + x.n, x.c)));
+    sel.value = show();
+  }
+  $("show").onchange = (e) => { store.set("show", e.target.value); synth?.cancel(); cur = null; render(); };
 
   // ---- status ----
   function status(kind, text) {
@@ -145,9 +169,11 @@
     for (const [sid, rec] of els) if (!(sid in lines)) { rec.el.remove(); els.delete(sid); }
     const box = $("lines");
     let prev = null;
-    const lastT = ids.slice().reverse().find((id) => lines[id].t);
+    const lastT = ids.slice().reverse().find((id) => view(lines[id]).t);
+    fillShow();
+    const sh = show();
     for (const id of ids) {
-      const l = lines[id], json = JSON.stringify(l);
+      const l = lines[id], v = view(l), json = sh + JSON.stringify(l);
       let rec = els.get(String(id));
       if (!rec) {
         const el = document.createElement("div");
@@ -158,14 +184,14 @@
         if (prev) prev.after(el); else box.prepend(el);
       }
       if (rec.json !== json) {
-        if (!rec.json || JSON.parse(rec.json).t !== l.t) changedAt[id] = Date.now();
-        rec.json = json;
+        if (rec.vt !== v.t) changedAt[id] = Date.now();
+        rec.json = json; rec.vt = v.t;
         const who = rec.el.children[0], o = rec.el.children[1], t = rec.el.children[2];
         who.hidden = !l.s; who.textContent = l.s || ""; who.style.color = l.c || "";
-        o.textContent = l.o || ""; o.hidden = !l.o;
-        t.textContent = l.w ? "translating…" : (l.t || "");
-        t.className = "t" + (l.w ? " wait" : "");
-        rec.el.classList.toggle("blank", !l.w && !(l.t || "").trim()); // nothing to show yet
+        o.textContent = v.o; o.hidden = !v.o;
+        t.textContent = v.w ? "translating…" : v.t;
+        t.className = "t" + (v.w ? " wait" : "");
+        rec.el.classList.toggle("blank", !v.w && !v.t.trim() && !v.o.trim()); // nothing to show yet
       }
       rec.el.classList.toggle("old", lastT != null && id < lastT - 1);
       prev = rec.el;
@@ -209,9 +235,10 @@
     const chosen = store.get("voice." + lang, "ai");
     return list.find((v) => v.name === chosen) || list[0] || null;
   }
-  const useAi = () => store.get("voice." + (BCP[state.meta?.target] || state.meta?.target || ""), "ai") === "ai";
+  const voiceLang = () => { const sh = show(); const c = sh !== "both" && sh !== "one" ? sh : state.meta?.target || ""; return BCP[c] || c; };
+  const useAi = () => store.get("voice." + voiceLang(), "ai") === "ai";
   function fillVoices() {
-    const sel = $("voice"), lang = BCP[state.meta?.target] || state.meta?.target || "";
+    const sel = $("voice"), lang = voiceLang();
     const list = lang ? voicesFor(lang) : [];
     const key = lang + "|" + list.map((v) => v.name).join("|");
     if (sel.dataset.key === key) return;
@@ -232,19 +259,22 @@
     }
     return out;
   }
-  const textOf = (l) => (l && !l.w ? l.t || "" : "");
+  const textOf = (l) => { if (!l) return ""; const v = view(l); return v.w ? "" : v.t; };
+  const langOf = (l) => (l && view(l).lang) || state.meta?.target || ""; // (two-way, both languages: each line's)
   function speakTick() {
     const lines = cleanLines();
     const ids = Object.keys(lines).map(Number).sort((a, b) => a - b);
     // Screen readers: each finished translation announced once.
-    for (const id of ids) if (lines[id].f && textOf(lines[id]) && id > (speakTick.announced ?? -1)) { $("announce").textContent = lines[id].t; speakTick.announced = id; }
+    for (const id of ids) if (lines[id].f && textOf(lines[id]) && id > (speakTick.announced ?? -1)) { $("announce").textContent = textOf(lines[id]); speakTick.announced = id; }
     if (!speakOn || useAi() || !synth || !ids.length || synth.speaking || synth.pending) return;
     if (!cur || !(cur.id in lines)) cur = { id: ids.find((id) => !cur || id >= cur.id) ?? ids[ids.length - 1], pos: 0 };
     const lastId = ids[ids.length - 1], now = Date.now();
-    const noSpaces = NO_SPACES.test(state.meta?.target || "");
+    const sayLang = langOf(lines[cur.id]);
+    const noSpaces = NO_SPACES.test(sayLang);
     let say = "", backlog = 0;
     for (let i = ids.indexOf(cur.id); i >= 0 && i < ids.length; i++) {
       const id = ids[i], t = textOf(lines[id]);
+      if (id !== cur.id && langOf(lines[id]) !== sayLang) break; // (another language: its own utterance)
       if (id !== cur.id) cur = { id, pos: 0 };
       if (cur.pos > t.length) cur.pos = t.length; // (text rewritten shorter)
       const rest = t.slice(cur.pos);
@@ -260,7 +290,7 @@
     for (const id of ids) if (id > cur.id) backlog += textOf(lines[id]).length;
     if (say.length > 450) { const lastLine = textOf(lines[cur.id]); say = lastLine.slice(0, cur.pos); }
     if (!say.trim()) return;
-    const lang = BCP[state.meta?.target] || state.meta?.target || "";
+    const lang = BCP[sayLang] || sayLang;
     const u = new SpeechSynthesisUtterance(say);
     if (lang) { u.lang = lang; const v = voiceFor(lang); if (v) u.voice = v; }
     u.rate = Math.min(1.6, 1 + Math.max(0, say.length - 60) / 300 + backlog / 400); // faster when text is waiting
@@ -293,11 +323,11 @@
     if ($("blackout").hidden) return;
     const lines = cleanLines();
     const id = Object.keys(lines).map(Number).sort((a, b) => b - a).find((k) => textOf(lines[k]));
-    $("boLine").textContent = id != null ? lines[id].t : "Waiting for the presenter…";
+    $("boLine").textContent = id != null ? textOf(lines[id]) : "Waiting for the presenter…";
   }
   synth?.addEventListener?.("voiceschanged", () => fillVoices());
   $("voice").onchange = (e) => {
-    const lang = BCP[state.meta?.target] || state.meta?.target || "";
+    const lang = voiceLang();
     store.set("voice." + lang, e.target.value);
     synth?.cancel();
     if (!speakOn) return;
