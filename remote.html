@@ -63,6 +63,7 @@
   .big { width: 100%; min-height: 86px; font-size: 24px; font-weight: 600; border-radius: 18px; }
   .big.go { background: var(--accent); border-color: var(--accent); color: #031018; }
   .big.pause { background: rgb(251 191 36 / 16%); border-color: var(--warn); color: var(--warn); }
+  .listen { width: 100%; min-height: 58px; font-size: 18px; font-weight: 600; }
   .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 8px; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .stop { color: var(--bad); border-color: rgb(248 113 113 / 45%); }
@@ -97,6 +98,11 @@
 
   <button id="mainBtn" class="big go">▶ Start</button>
   <button id="stopBtn" class="big stop" style="min-height:58px;font-size:18px">■ Stop</button>
+
+  <section class="card">
+    <button id="listenBtn" class="listen">🎧 Listen on this phone</button>
+    <p class="note" id="listenNote">Plays the translated voice on this phone only (use headphones). The computer's own speakers are set separately with Speak aloud.</p>
+  </section>
 
   <section class="card">
     <p class="label">TRANSLATION MODE</p>
@@ -146,7 +152,7 @@
 
 <script>
 (() => {
-  const BUILD = "1120-2";
+  const BUILD = "1120-3";
   const API_KEY = "AIzaSyCsuREGnHgpaXWpQLgLPiL2ECgtMUtP9Cc"; // the Firebase web key (public by design)
   const DB = "https://retitra-live-default-rtdb.asia-southeast1.firebasedatabase.app";
   const $ = (id) => document.getElementById(id);
@@ -299,6 +305,152 @@
     fillLangs($("target"), st.target); fillLangs($("langA"), st.langA); fillLangs($("langB"), st.langB);
     for (const id of ["target", "langA", "langB"]) $(id).disabled = live;
     $("langNote").hidden = !live;
+    $("listenBtn").classList.toggle("on", listening);
+    $("listenBtn").textContent = listening ? "🎧 Listening on this phone (tap to stop)" : "🎧 Listen on this phone";
+    if (listening) $("listenNote").textContent = !live ? "The voice starts when the meeting runs." : paused ? "The meeting is paused." : st.hearing ? "Playing the translated voice here. Speak aloud on the computer is separate." : "Connecting the voice…";
+    else $("listenNote").textContent = "Plays the translated voice on this phone only (use headphones). The computer's own speakers are set separately with Speak aloud.";
+  }
+
+
+  // ---- "Listen on this phone": the AI interpreter's voice, streamed from the computer to this phone only ----
+  // The computer sends 24 kHz mu-law pieces to <key>-a while this phone says it is listening (listenAt, renewed
+  // every 20 s). Played like the audience page does: each piece starts exactly where the previous one ends, a
+  // small buffer absorbs network jitter, long pauses are shortened when the voice falls behind.
+  let listening = false, listenTimer = 0;
+  let actx = null, aes = null, aLast = "", aNext = 0, aQueued = [], aSilent = null, aBuf = 0.5, aLastAt = 0, aRsPos = 0, aRsLast = 0;
+  let aOut = null, aMedia = null, aPollT = 0;
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  function shrinkSilence(x, sr, keepMs = 100) {
+    const F = Math.round(sr / 100), keep = Math.round(keepMs / 10);
+    const out = new Float32Array(x.length);
+    let o = 0, quiet = 0;
+    for (let i0 = 0; i0 < x.length; i0 += F) {
+      const e = Math.min(x.length, i0 + F);
+      let sum = 0; for (let i = i0; i < e; i++) sum += x[i] * x[i];
+      const silent = Math.sqrt(sum / (e - i0)) < 0.006;
+      quiet = silent ? quiet + 1 : 0;
+      if (silent && quiet > keep) continue;
+      out.set(x.subarray(i0, e), o); o += e - i0;
+    }
+    return out.subarray(0, o);
+  }
+  const ULAW = (() => {
+    const t = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const u = ~i & 0xff, sign = u & 0x80, exp = (u >> 4) & 7, man = u & 0x0f;
+      const v = (((man << 3) + 132) << exp) - 132;
+      t[i] = (sign ? -v : v) / 32768;
+    }
+    return t;
+  })();
+  function aiPlay(b64) {
+    if (!actx) return;
+    const bin = atob(b64), n = bin.length;
+    if (!n) return;
+    const x = new Float32Array(n);
+    for (let i = 0; i < n; i++) x[i] = ULAW[bin.charCodeAt(i)];
+    const behind = Math.max(0, aNext - actx.currentTime);
+    const s24 = behind > 2 ? shrinkSilence(x, 24000) : x;
+    const m = s24.length;
+    if (!m) return;
+    const R = actx.sampleRate, step = 24000 / R;
+    const y = new Float32Array(m + 1);
+    y[0] = aRsLast; y.set(s24, 1);
+    const out = new Float32Array(Math.ceil((m - aRsPos) / step) + 1);
+    let k = 0, pos = aRsPos;
+    for (; pos < m; pos += step) { const i = Math.floor(pos), f = pos - i; out[k++] = y[i] * (1 - f) + y[i + 1] * f; }
+    aRsPos = pos - m; aRsLast = y[m];
+    if (!k) return;
+    const buf = actx.createBuffer(1, k, R);
+    buf.getChannelData(0).set(out.subarray(0, k));
+    const now = actx.currentTime, at = performance.now();
+    if (aNext < now + 0.05) { if (at - aLastAt < 1200) aBuf = Math.min(2, aBuf + 0.3); aNext = now + aBuf; }
+    aLastAt = at;
+    if (aNext - now > 25) { for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } } aQueued = []; aNext = now + aBuf; }
+    const src = actx.createBufferSource();
+    src.buffer = buf;
+    src.connect(aOut || actx.destination);
+    src.start(aNext);
+    aNext += buf.duration;
+    aQueued.push(src);
+    src.onended = () => { aQueued = aQueued.filter((q) => q !== src); };
+    if (window.__rtl) window.__rtl.push([Date.now(), n]);
+  }
+  function silentWav() { // 1 s of silence, looped: keeps iPhone audio in "playback" mode
+    const n = 16000, b = new ArrayBuffer(44 + n * 2), d = new DataView(b);
+    const w = (o, str) => { for (let i = 0; i < str.length; i++) d.setUint8(o + i, str.charCodeAt(i)); };
+    w(0, "RIFF"); d.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); d.setUint32(16, 16, true);
+    d.setUint16(20, 1, true); d.setUint16(22, 1, true); d.setUint32(24, 16000, true); d.setUint32(28, 32000, true);
+    d.setUint16(32, 2, true); d.setUint16(34, 16, true); w(36, "data"); d.setUint32(40, n * 2, true);
+    return URL.createObjectURL(new Blob([b], { type: "audio/wav" }));
+  }
+  async function listenPing(on) {
+    try {
+      const t = await auth();
+      await fetch(cmdUrl(t), { method: "PATCH", body: JSON.stringify({ listenAt: on ? Date.now() : 0 }) });
+    } catch { /* next ping */ }
+  }
+  function listenStart() {
+    // Started by the tap (phones only allow sound after one).
+    try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch { /* older Safari */ }
+    if (!aSilent) { aSilent = new Audio(silentWav()); aSilent.loop = true; }
+    aSilent.play().catch(() => {});
+    actx ||= new (window.AudioContext || window.webkitAudioContext)();
+    actx.resume();
+    // Android: through a media element, so it keeps playing with the screen off (iPhone stops web audio when locked).
+    if (!IOS && !aMedia && actx.createMediaStreamDestination) {
+      try {
+        const dest = actx.createMediaStreamDestination();
+        aMedia = new Audio(); aMedia.srcObject = dest.stream;
+        aMedia.play().then(() => { aOut = dest; aSilent?.pause(); }).catch(() => { aOut = null; aMedia = null; });
+      } catch { aOut = null; aMedia = null; }
+    } else if (aMedia) aMedia.play().catch(() => {});
+    const b = actx.createBuffer(1, 256, actx.sampleRate), s0 = actx.createBufferSource(); s0.buffer = b; s0.connect(actx.destination); s0.start();
+    listening = true;
+    listenPing(true);
+    clearInterval(listenTimer); listenTimer = setInterval(() => listenPing(true), 20000);
+    if (navigator.mediaSession) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: "Live translation", artist: "RetiTra Remote" });
+        navigator.mediaSession.setActionHandler("pause", () => listenStop());
+        navigator.mediaSession.setActionHandler("stop", () => listenStop());
+      } catch { /* not supported */ }
+    }
+    let skip = true; // what is already on the server is old: start with what comes next
+    const url = `${DB}/rooms/${saved.key}-a/c.json`;
+    if (polling) { aes = { close() { clearTimeout(aPollT); } }; aiPoll(true); render(); return; }
+    aes = new EventSource(url);
+    const take = (k, v) => { if (typeof v === "string" && k > aLast) { aLast = k; if (!skip) aiPlay(v); } };
+    aes.addEventListener("put", (e) => {
+      const { path, data } = JSON.parse(e.data);
+      if (path === "/") { for (const k of Object.keys(data || {}).sort()) take(k, data[k]); skip = false; }
+      else take(path.slice(1), data);
+    });
+    aes.addEventListener("patch", (e) => {
+      const { data } = JSON.parse(e.data);
+      for (const k of Object.keys(data || {}).sort()) take(k.replace(/^.*\//, ""), data[k]);
+    });
+    render();
+  }
+  async function aiPoll(first) {
+    if (!listening) return;
+    try {
+      const q = first ? 'orderBy="$key"&limitToLast=1' : `orderBy="$key"&startAt=${encodeURIComponent(JSON.stringify(aLast ? aLast + "~" : "a"))}`;
+      const r = await fetch(`${DB}/rooms/${saved.key}-a/c.json?${q}`, { cache: "no-store" });
+      const data = r.ok ? await r.json() : null;
+      for (const k of Object.keys(data || {}).sort()) if (k > aLast) { aLast = k; if (!first) aiPlay(data[k]); }
+    } catch { /* retry */ }
+    if (listening) aPollT = setTimeout(() => aiPoll(false), 300);
+  }
+  function listenStop() {
+    listening = false;
+    clearInterval(listenTimer);
+    listenPing(false);
+    try { aes?.close(); } catch { /* closed */ }
+    for (const q of aQueued) { try { q.stop(); } catch { /* ended */ } }
+    aes = null; aNext = 0; aQueued = [];
+    aSilent?.pause(); aMedia?.pause();
+    render();
   }
 
   // ---- buttons ----
@@ -307,6 +459,7 @@
   document.querySelectorAll("[data-polish]").forEach((b) => (b.onclick = () => send("polish", b.dataset.polish)));
   document.querySelectorAll("[data-dir]").forEach((b) => (b.onclick = () => send("dir", b.dataset.dir)));
   $("speakBtn").onclick = () => send("speak", !st?.speak);
+  $("listenBtn").onclick = () => (listening ? listenStop() : listenStart());
   $("origBtn").onclick = () => send("orig", !st?.showOriginal);
   $("presentBtn").onclick = () => send("present", !st?.present);
   $("shareBtn").onclick = () => { if (st?.share && !confirm("Stop sharing to phones? The audience's phones stop updating.")) return; send("share", !st?.share); };
@@ -321,6 +474,7 @@
   (async () => {
     try {
       if (!(await claim())) { lost(); return; }
+      listenPing(false); // (after a reload the voice needs a new tap: phones only play sound after one)
       listen();
     } catch {
       conn("bad", "No connection"); setTimeout(() => location.reload(), 5000);
