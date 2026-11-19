@@ -1,0 +1,10 @@
+{
+  "name": "RetiTra Remote",
+  "short_name": "RetiTra",
+  "start_url": "remote.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#05070f",
+  "theme_color": "#05070f",
+  "icons": [{ "src": "remote-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }]
+}
