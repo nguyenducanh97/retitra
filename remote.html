@@ -50,9 +50,11 @@
   .state { display: flex; align-items: baseline; gap: 10px; }
   .state b { font-size: 22px; font-weight: 600; }
   .state span { color: var(--muted); font-size: 13px; }
-  .preview { margin-top: 10px; min-height: 44px; }
-  .preview .o { color: var(--muted); font-size: 13px; }
-  .preview .t { font-size: 16px; font-weight: 500; margin-top: 2px; }
+  /* Fixed height (one line of original, two of translation): the buttons below never move as the captions change. */
+  .preview { margin-top: 10px; height: 66px; overflow: hidden; }
+  .preview .o { color: var(--muted); font-size: 13px; line-height: 18px; height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .preview .t { font-size: 16px; font-weight: 500; margin-top: 2px; line-height: 22px; max-height: 44px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   button, select {
     font: inherit; color: var(--text); background: transparent; border: 1px solid var(--border);
     border-radius: 12px; min-height: 48px; padding: 10px 12px; cursor: pointer; touch-action: manipulation;
@@ -288,8 +290,10 @@
     const live = !!st.running, paused = live && !!st.paused;
     $("stateText").textContent = !live ? "Stopped" : paused ? "Paused" : "Listening";
     $("titleText").textContent = st.title || "";
-    $("pvO").textContent = st.line?.o || "";
-    $("pvT").textContent = st.line?.t || (live ? "" : "Press Start to begin.");
+    // (The newest words matter: a long line shows its end.)
+    const tail = (t, n) => (t.length > n ? "…" + t.slice(-n).replace(/^\S*\s/, "") : t);
+    $("pvO").textContent = tail(st.line?.o || "", 48);
+    $("pvT").textContent = tail(st.line?.t || "", 80) || (live ? "" : "Press Start to begin.");
     const main = $("mainBtn");
     main.textContent = !live ? "▶ Start" : paused ? "▶ Resume" : "⏸ Pause";
     main.className = "big " + (live && !paused ? "pause" : "go");
