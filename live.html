@@ -85,7 +85,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1121-2</span>
+    <span class="build" title="Version of this page">1121-3</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -135,6 +135,8 @@
     if (sh === "both") return { o: l.o || "", t: l.t || "", w: l.w, lang: l.tl || "" };
     if (sh === "one") return { o: "", t: l.t || "", w: l.w, lang: state.meta?.target || "" };
     if (l.ol === sh) return { o: "", t: l.o || "", w: 0, lang: sh };
+    // A third language (Mic per person): its text translation, which comes a moment after the line is finished.
+    if (l.tl && l.tl !== sh && thirdLang(sh)) return { o: "", t: l.x?.[sh] || "", w: l.x?.[sh] ? 0 : 1, lang: sh };
     return { o: "", t: l.t || "", w: l.w, lang: sh };
   }
   // ---- Mic per person: whose phone this is. Read aloud then skips that person's own words (they hear only the
@@ -151,6 +153,7 @@
     sel.value = me();
   }
   $("who").onchange = (e) => { store.set("me." + room, e.target.value); synth?.cancel(); };
+  const thirdLang = (c) => !!state.meta?.pair?.some((x) => x.c === c && x.x);
   const applyOrig = () => document.body.classList.toggle("no-orig", show() !== "both");
   function fillShow() {
     const sel = $("show"), p = state.meta?.pair;
@@ -254,18 +257,20 @@
     return list.find((v) => v.name === chosen) || list[0] || null;
   }
   const voiceLang = () => { const sh = show(); const c = sh !== "both" && sh !== "one" ? sh : state.meta?.target || ""; return BCP[c] || c; };
-  const useAi = () => store.get("voice." + voiceLang(), "ai") === "ai";
+  // (A third language is written as text only: the AI interpreter voice speaks Language A and B, so the phone's voice reads it.)
+  const useAi = () => store.get("voice." + voiceLang(), "ai") === "ai" && !thirdLang(show());
   function fillVoices() {
     const sel = $("voice"), lang = voiceLang();
     const list = lang ? voicesFor(lang) : [];
-    const key = lang + "|" + list.map((v) => v.name).join("|");
+    const third = thirdLang(show());
+    const key = lang + "|" + third + "|" + list.map((v) => v.name).join("|");
     if (sel.dataset.key === key) return;
     sel.dataset.key = key;
-    sel.replaceChildren(new Option("AI interpreter voice (natural)", "ai"),
+    sel.replaceChildren(...(third ? [] : [new Option("AI interpreter voice (natural)", "ai")]),
       ...list.map((v) => new Option("Phone voice: " + v.name.replace(/\s*-\s*.*$/, "").replace(/^Microsoft\s+/, ""), v.name)));
     if (!list.length) sel.append(new Option("Phone voice (default)", ""));
     const chosen = store.get("voice." + lang, "ai");
-    sel.value = [...sel.options].some((o) => o.value === chosen) ? chosen : "ai";
+    sel.value = [...sel.options].some((o) => o.value === chosen) ? chosen : sel.options[0]?.value ?? "";
     sel.hidden = false;
   }
   // Lines keyed "l<number>" (spoken order); empty entries skipped.
