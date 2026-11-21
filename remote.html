@@ -349,7 +349,7 @@
   })();
   function aiPlay(b64) {
     if (!actx) return;
-    const bin = atob(b64), n = bin.length;
+    const bin = atob(String(b64).replace(/^[^:]*:/, "")), n = bin.length; // ("m0:" = whose words it translates)
     if (!n) return;
     const x = new Float32Array(n);
     for (let i = 0; i < n; i++) x[i] = ULAW[bin.charCodeAt(i)];

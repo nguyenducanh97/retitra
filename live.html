@@ -63,6 +63,8 @@
   #speak { flex: 1; min-width: 150px; font-weight: 600; }
   #show { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
     border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 4; }
+  #who { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 3; }
   #voice { font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
     border-radius: 10px; padding: 9px 8px; min-height: 42px; max-width: 100%; flex: 1 1 100%; order: 5; }
   .jump {
@@ -83,7 +85,7 @@
     <span class="brand">Re<em>ti</em>Tra</span>
     <span class="title" id="title">Live captions</span>
     <span class="status" id="status"><i></i><span id="statusText">Connecting…</span></span>
-    <span class="build" title="Version of this page">1121-1</span>
+    <span class="build" title="Version of this page">1121-2</span>
   </header>
   <main id="main" aria-label="Live captions">
     <p class="empty" id="empty">Waiting for the presenter…</p>
@@ -94,6 +96,7 @@
     <button id="speak" aria-pressed="false">Read aloud: off</button>
     <select id="show" aria-label="Languages shown" hidden></select>
     <select id="voice" aria-label="Voice" hidden></select>
+    <select id="who" aria-label="This phone is for" hidden></select>
     <button id="smaller" aria-label="Smaller text">A−</button>
     <button id="bigger" aria-label="Larger text">A+</button>
     <button id="black" aria-label="Black screen to save battery">Black screen</button>
@@ -134,6 +137,20 @@
     if (l.ol === sh) return { o: "", t: l.o || "", w: 0, lang: sh };
     return { o: "", t: l.t || "", w: l.w, lang: sh };
   }
+  // ---- Mic per person: whose phone this is. Read aloud then skips that person's own words (they hear only the
+  // others, through their headphones); the text stays on screen. Everyone else: "Just listening" (hears all).
+  const me = () => { const p = state.meta?.people; const v = store.get("me." + room, ""); return p && p.some((x) => x.k === v) ? v : ""; };
+  function fillWho() {
+    const sel = $("who"), p = state.meta?.people;
+    const key = p ? p.map((x) => x.k + x.n).join("|") : "";
+    sel.hidden = !p;
+    if (!p || sel.dataset.key === key) return;
+    sel.dataset.key = key;
+    sel.replaceChildren(new Option("This phone: just listening (hear everyone)", ""),
+      ...p.map((x) => new Option(`This phone is ${x.n}'s (don't read my own words)`, x.k)));
+    sel.value = me();
+  }
+  $("who").onchange = (e) => { store.set("me." + room, e.target.value); synth?.cancel(); };
   const applyOrig = () => document.body.classList.toggle("no-orig", show() !== "both");
   function fillShow() {
     const sel = $("show"), p = state.meta?.pair;
@@ -202,6 +219,7 @@
     $("title").textContent = m.title || (m.targetName ? "Live captions · " + m.targetName : "Live captions");
     if (m.title) document.title = m.title + " · RetiTra";
     applyOrig();
+    fillWho();
     fillVoices();
     updateBlackout();
     if (follow) main.scrollTop = main.scrollHeight;
@@ -260,6 +278,7 @@
     return out;
   }
   const textOf = (l) => { if (!l) return ""; const v = view(l); return v.w ? "" : v.t; };
+  const sayOf = (l) => (l && me() && l.k === me() ? "" : textOf(l)); // (what Read aloud says: not my own words)
   const langOf = (l) => (l && view(l).lang) || state.meta?.target || ""; // (two-way, both languages: each line's)
   function speakTick() {
     const lines = cleanLines();
@@ -273,7 +292,7 @@
     const noSpaces = NO_SPACES.test(sayLang);
     let say = "", backlog = 0;
     for (let i = ids.indexOf(cur.id); i >= 0 && i < ids.length; i++) {
-      const id = ids[i], t = textOf(lines[id]);
+      const id = ids[i], t = sayOf(lines[id]);
       if (id !== cur.id && langOf(lines[id]) !== sayLang) break; // (another language: its own utterance)
       if (id !== cur.id) cur = { id, pos: 0 };
       if (cur.pos > t.length) cur.pos = t.length; // (text rewritten shorter)
@@ -287,8 +306,8 @@
       if (id === lastId) break;
     }
     // Far behind (a long backlog of unread text): jump to the newest line.
-    for (const id of ids) if (id > cur.id) backlog += textOf(lines[id]).length;
-    if (say.length > 450) { const lastLine = textOf(lines[cur.id]); say = lastLine.slice(0, cur.pos); }
+    for (const id of ids) if (id > cur.id) backlog += sayOf(lines[id]).length;
+    if (say.length > 450) { const lastLine = sayOf(lines[cur.id]); say = lastLine.slice(0, cur.pos); }
     if (!say.trim()) return;
     const lang = BCP[sayLang] || sayLang;
     const u = new SpeechSynthesisUtterance(say);
@@ -377,9 +396,14 @@
   // Gemini's voice is played exactly as it comes (no speed change). When it is more than 2 s behind, the pauses
   // in it are shortened so it catches up; only beyond 25 s behind is waiting speech skipped.
   let aFlushT = 0;
-  function aiPlay(b64) {
+  function aiPlay(piece) {
     if (!actx) return;
-    const bin = atob(b64), n = bin.length;
+    // "m0:<audio>": the voice of Person 1's words. This person's own phone skips it (they said it themselves).
+    const m = /^([^:]*):/.exec(piece);
+    const tally = (window.__pieces ||= {}), who = m ? m[1] : "-";
+    if (m && me() && m[1] === me()) { tally["skip " + who] = (tally["skip " + who] || 0) + 1; return; }
+    tally["play " + who] = (tally["play " + who] || 0) + 1;
+    const bin = atob(m ? piece.slice(m[0].length) : piece), n = bin.length;
     if (!n) return;
     const x = new Float32Array(n);
     for (let i = 0; i < n; i++) x[i] = ULAW[bin.charCodeAt(i)];
